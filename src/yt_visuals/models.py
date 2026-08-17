@@ -328,6 +328,7 @@ class Project(TimestampMixin, Base):
     stories: Mapped[list["Story"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="Story.position"
     )
+    asset_usages: Mapped[list["AssetUsage"]] = relationship(back_populates="project")
 
 
 class Story(TimestampMixin, Base):
@@ -364,14 +365,20 @@ class AssetUsage(TimestampMixin, Base):
         ),
         Index("ix_asset_usages_asset_used", "asset_id", "used_at"),
         Index("ix_asset_usages_story_id", "story_id"),
+        Index("ix_asset_usages_project_used", "project_id", "used_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     asset_id: Mapped[int] = mapped_column(
         ForeignKey("media_assets.id", ondelete="CASCADE"), nullable=False
     )
-    story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    story_id: Mapped[int | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"))
     segment_label: Mapped[str | None] = mapped_column(String(255))
+    usage_reference: Mapped[str | None] = mapped_column(String(255))
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True)
     narration_start_ms: Mapped[int | None] = mapped_column(Integer)
     narration_end_ms: Mapped[int | None] = mapped_column(Integer)
     usage_role: Mapped[str | None] = mapped_column(String(100))
@@ -381,4 +388,5 @@ class AssetUsage(TimestampMixin, Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
     asset: Mapped[MediaAsset] = relationship(back_populates="usages")
-    story: Mapped[Story] = relationship(back_populates="asset_usages")
+    project: Mapped[Project | None] = relationship(back_populates="asset_usages")
+    story: Mapped[Story | None] = relationship(back_populates="asset_usages")

@@ -4,6 +4,7 @@ import argparse
 import json
 from collections.abc import Callable
 
+from pydantic import ValidationError
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -11,10 +12,11 @@ from .acquisition import AcquisitionOutcome, AcquisitionService
 from .config import Settings
 from .database import initialize_database
 from .doctor import all_checks_pass, run_doctor
-from .library import LibraryScanner, LibrarySearchFilters, get_library_status, search_library
+from .library import LibraryScanner
 from .providers.base import MediaProvider, MediaSearchResult, SearchPage
 from .providers.errors import ProviderError
 from .providers.registry import create_provider, list_providers
+from .services import MediaCatalogService, MediaServiceError, SearchMediaRequest
 
 
 ProviderFactory = Callable[[str, Settings], MediaProvider]
@@ -123,6 +125,14 @@ def cli(
 
         if args.command == "library":
             return _library(args, settings)
+    except MediaServiceError as exc:
+        print(f"Error [{exc.code}]: {exc}")
+        return 1
+    except ValidationError as exc:
+        first = exc.errors(include_url=False)[0]
+        field = ".".join(str(item) for item in first["loc"])
+        print(f"Error [invalid_filter]: {field}: {first['msg']}")
+        return 1
     except (ProviderError, SQLAlchemyError, OSError, RuntimeError) as exc:
         print(f"Error: {exc}")
         return 1
@@ -132,6 +142,7 @@ def cli(
 
 def _library(args: argparse.Namespace, settings: Settings) -> int:
     engine = initialize_database(settings)
+    service = MediaCatalogService(engine)
     try:
         if args.library_command == "scan":
             summary = LibraryScanner(settings, engine).scan(
@@ -156,28 +167,30 @@ def _library(args: argparse.Namespace, settings: Settings) -> int:
             return 1 if summary.error_count else 0
 
         if args.library_command == "status":
-            status = get_library_status(engine)
+            status = service.get_library_status()
             if args.json:
-                print(json.dumps(status.to_dict(), indent=2))
+                print(json.dumps(_legacy_status_dict(status), indent=2))
             else:
                 print(
-                    f"Assets: {status.total_assets} total, {status.active_assets} active, "
+                    f"Assets: {status.total_assets} total, {status.available_assets} active, "
                     f"{status.missing_assets} missing, {status.unused_assets} unused"
                 )
                 print(f"Media: {status.images} image(s), {status.videos} video(s)")
                 print(
                     f"Locations: {status.available_locations} available, "
-                    f"{status.missing_locations} missing, {status.duplicate_locations} duplicate copy/copies"
+                    f"{status.missing_locations} missing, "
+                    f"{status.duplicate_physical_locations} duplicate copy/copies"
                 )
-                print(f"Available bytes: {status.total_bytes}")
+                print(f"Available bytes: {status.total_available_bytes}")
             return 0
 
         usage = "unused" if args.unused else "used" if args.used else None
-        filters = LibrarySearchFilters(
+        request = SearchMediaRequest(
+            query=args.query,
             media_type=args.media_type,
             orientation=args.orientation,
             usage=usage,
-            missing=args.missing,
+            availability="missing" if args.missing else "available",
             provider=args.provider,
             mime_type=args.mime,
             min_width=args.min_width,
@@ -186,9 +199,9 @@ def _library(args: argparse.Namespace, settings: Settings) -> int:
             max_duration_ms=_seconds_to_ms(args.max_duration),
             limit=args.limit,
         )
-        results = search_library(engine, args.query, filters)
+        results = service.search_media(request).candidates
         if args.json:
-            print(json.dumps([item.to_dict() for item in results], indent=2))
+            print(json.dumps([_legacy_search_dict(item) for item in results], indent=2))
         else:
             print(f"{len(results)} catalog result(s).")
             for item in results:
@@ -196,9 +209,10 @@ def _library(args: argparse.Namespace, settings: Settings) -> int:
                     f"{item.width}x{item.height}" if item.width and item.height else "dimensions unknown"
                 )
                 duration = f", {item.duration_ms / 1000:g}s" if item.duration_ms is not None else ""
-                print(f"\n{item.id}: {item.relative_path}")
+                print(f"\n{item.asset_id}: {item.relative_path}")
                 print(f"  {item.media_type}; {item.mime_type or 'MIME unknown'}; {dimensions}{duration}")
-                print(f"  {item.status}; used {item.usage_count} time(s); SHA-256 {item.sha256 or 'unknown'}")
+                status = "active" if item.available else "missing"
+                print(f"  {status}; used {item.usage_count} time(s); SHA-256 {item.sha256 or 'unknown'}")
                 if item.providers:
                     print(f"  Providers: {', '.join(item.providers)}")
                 if len(item.locations) > 1:
@@ -206,6 +220,42 @@ def _library(args: argparse.Namespace, settings: Settings) -> int:
         return 0
     finally:
         engine.dispose()
+
+
+def _legacy_status_dict(status) -> dict[str, object]:
+    return {
+        "total_assets": status.total_assets,
+        "active_assets": status.available_assets,
+        "missing_assets": status.missing_assets,
+        "images": status.images,
+        "videos": status.videos,
+        "available_locations": status.available_locations,
+        "missing_locations": status.missing_locations,
+        "duplicate_locations": status.duplicate_physical_locations,
+        "unused_assets": status.unused_assets,
+        "total_bytes": status.total_available_bytes,
+    }
+
+
+def _legacy_search_dict(item) -> dict[str, object]:
+    return {
+        "id": item.asset_id,
+        "relative_path": item.relative_path,
+        "locations": list(item.locations),
+        "media_type": item.media_type,
+        "mime_type": item.mime_type,
+        "width": item.width,
+        "height": item.height,
+        "duration_ms": item.duration_ms,
+        "orientation": item.orientation,
+        "status": "active" if item.available else "missing",
+        "sha256": item.sha256,
+        "usage_count": item.usage_count,
+        "last_used_at": item.last_used_at.isoformat() if item.last_used_at else None,
+        "providers": list(item.providers),
+        "creators": list(item.creators),
+        "tags": list(item.tags),
+    }
 
 
 def _seconds_to_ms(value: float | None) -> int | None:

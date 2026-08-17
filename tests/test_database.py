@@ -32,7 +32,7 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         status = get_migration_status(catalog_settings, connection)
         assert status.is_current
-        assert status.current_revision == "0003_local_locations"
+        assert status.current_revision == "0004_usage_context"
 
     engine.dispose()
 

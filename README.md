@@ -8,6 +8,79 @@ provider.
 The project does not yet support Pixabay, generate manifests, use AI services, automate
 DaVinci Resolve, or assemble video.
 
+## Media service layer
+
+`yt_visuals.services.MediaCatalogService` is the application boundary for catalog reads
+and usage writes. It returns validated Pydantic models instead of SQLAlchemy objects or
+CLI-formatted text. This keeps search, ranking, asset detail, status, recent-usage, and
+usage-recording rules reusable by a future MCP server without copying business logic.
+
+The CLI remains a presentation adapter: existing `library search` and `library status`
+commands call the service and preserve their established human and JSON output. Phase 3
+does not include an MCP server, HTTP server, AI integration, or script ingestion.
+
+Example Python usage:
+
+```python
+from yt_visuals.config import Settings
+from yt_visuals.database import initialize_database
+from yt_visuals.services import MediaCatalogService, SearchMediaRequest
+
+settings = Settings.load()
+engine = initialize_database(settings)
+service = MediaCatalogService(engine)
+
+result = service.search_media(
+    SearchMediaRequest(
+        query="abandoned factory",
+        media_type="image",
+        orientation="landscape",
+        usage="unused",
+        limit=10,
+    )
+)
+print(result.model_dump_json(indent=2))
+engine.dispose()
+```
+
+Service requests and results reject unknown fields and publish JSON Schema through
+Pydantic's `model_json_schema()`. A ranked search response has a stable shape similar to:
+
+```json
+{
+  "query": "abandoned factory",
+  "returned": 1,
+  "candidates": [
+    {
+      "rank": 1,
+      "score": 137,
+      "score_reasons": ["available:+40", "exact_tag:factory:+30"],
+      "asset_id": 12,
+      "relative_path": "Library/Images/factory.jpg",
+      "current_location": "Library/Images/factory.jpg",
+      "media_type": "image",
+      "orientation": "landscape",
+      "available": true,
+      "providers": ["pexels"],
+      "tags": ["factory", "industrial"],
+      "usage_count": 0,
+      "recent_usage_count": 0
+    }
+  ]
+}
+```
+
+Asset-detail results include every known location, provider/source and creator data,
+license/attribution, tags, technical identity, availability, and recent usage. Status
+results distinguish local-import and provider-download locations. Since scan executions
+are not yet stored as their own records, `last_scan_at` and `last_scan_status` are null.
+
+Usage writes require a caller-generated `idempotency_key`. Repeating the same request with
+the same key returns the original row; reusing the key for different content is rejected.
+Usage can be associated with a project, a story (with its project derived and validated),
+or left unassigned for later organization. Missing assets are rejected unless the caller
+explicitly sets `allow_missing=True`.
+
 ## Existing media layout
 
 - `Library/Images` stores downloaded or curated images.
@@ -247,4 +320,7 @@ Phase 2A initially reused that schema. Migration `0002_download_history` adds th
 independent, historical `media_downloads` audit table without altering the original
 provenance or usage tables. Phase 2B migration `0003_local_locations` adds the narrowly
 scoped `media_locations` table for multiple local paths, origin, availability, efficient
-unchanged-file checks, and missing/restored timestamps. Prior migrations remain unchanged.
+unchanged-file checks, and missing/restored timestamps. Phase 3 migration
+`0004_usage_context` makes story context optional and adds project context, a visual usage
+reference, and a unique idempotency key to usage history. The existing usage-count
+triggers remain the single source of truth. Prior migrations remain unchanged.
