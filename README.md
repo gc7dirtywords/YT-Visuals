@@ -1,11 +1,12 @@
 # YT Visuals
 
 Local system for cataloging and sourcing reusable images and video clips used in
-YouTube production. It currently includes the SQLite catalog foundation plus a
-provider-neutral search and acquisition layer with Pexels as the first provider.
+YouTube production. It includes the SQLite catalog, a recursive local-library scanner,
+basic catalog search, and a provider-neutral acquisition layer with Pexels as the first
+provider.
 
-The project does not yet scan existing media, support Pixabay, generate manifests,
-use AI services, or assemble video.
+The project does not yet support Pixabay, generate manifests, use AI services, automate
+DaVinci Resolve, or assemble video.
 
 ## Existing media layout
 
@@ -78,6 +79,75 @@ Run the complete environment check. This also initializes or migrates the databa
 ```powershell
 .\.venv\Scripts\yt-visuals.exe doctor
 ```
+
+## Local library scanner
+
+The scanner recursively inspects supported files below `Library/Images` (JPEG, PNG, and
+WebP) and `Library/Videos` (MP4, MOV, M4V, MKV, and WebM). Images are validated and sized
+with Pillow. Videos are inspected with ffprobe for dimensions, duration, and useful probe
+metadata. Every cataloged file has a root-relative path, size, modified time, MIME type,
+SHA-256, dimensions, and duration where applicable.
+
+Preview a reconciliation without changing the database, then perform it:
+
+```powershell
+.\.venv\Scripts\yt-visuals.exe library scan --dry-run
+.\.venv\Scripts\yt-visuals.exe library scan
+.\.venv\Scripts\yt-visuals.exe library scan --verbose
+.\.venv\Scripts\yt-visuals.exe library scan --json
+```
+
+Normal output is a compact summary; `--verbose` includes per-file decisions. A corrupt,
+unreadable, disappearing, or unprobeable file is reported as an inspection error without
+stopping other files from being cataloged. Symlinks are not followed, so scanning cannot
+escape the two configured library roots.
+
+Scanning is read-only with respect to media bytes: it never moves, renames, overwrites,
+transcodes, or deletes user files. Unsupported extensions are ignored. SHA-256 is the
+authoritative physical identity, while an exact path/size/modified-time match avoids
+rehashing unchanged files on later scans.
+
+### Local paths, duplicates, and missing media
+
+`media_locations` records local availability independently from provider provenance. One
+`media_assets` row can therefore retain multiple paths for byte-identical copies. The
+first available path remains the asset's canonical path. If the last available copy is
+renamed or moved inside the library, a matching SHA-256 associates the new path with the
+same asset and updates the canonical path without losing tags, sources, license details,
+or usage history. Old paths remain recorded as missing rather than being silently erased.
+
+If all known paths disappear, the asset is marked `missing`; the catalog row and all its
+history and provenance remain intact. A later scan automatically restores an identical
+path when the file reappears. Use the status command to see current availability:
+
+```powershell
+.\.venv\Scripts\yt-visuals.exe library status
+.\.venv\Scripts\yt-visuals.exe library status --json
+```
+
+Local files receive `local_import` location provenance and no invented provider, creator,
+license, or attribution. New provider downloads receive `provider_download` location
+provenance plus their independent `media_sources` and `asset_licenses` records. If a
+provider download matches a pre-existing local SHA-256, the existing asset is reused and
+the provider source is attached; local and provider provenance are both preserved.
+
+## Local catalog search
+
+Catalog search never scans, downloads, or creates usage records. It matches paths and
+filenames, titles/descriptions, tags, providers, creators, MIME types, and project/story
+usage text. Results expose availability, dimensions, derived orientation, duration,
+SHA-256, usage count, and last-used time. Examples:
+
+```powershell
+.\.venv\Scripts\yt-visuals.exe library search "factory"
+.\.venv\Scripts\yt-visuals.exe library search --type image --orientation landscape --unused
+.\.venv\Scripts\yt-visuals.exe library search --type video --min-duration 5 --max-duration 30
+.\.venv\Scripts\yt-visuals.exe library search --provider pexels
+.\.venv\Scripts\yt-visuals.exe library search --missing --json
+```
+
+Additional filters include `--mime`, `--min-width`, `--min-height`, `--used`, and
+`--limit`. Search shows active assets by default; `--missing` selects missing assets.
 
 Search Pexels without downloading or changing the catalog:
 
@@ -175,4 +245,6 @@ and attribution, projects/episodes, stories, and asset usage history. SQLite tri
 maintain each asset's placement count and last-used timestamp from the usage-history rows.
 Phase 2A initially reused that schema. Migration `0002_download_history` adds the
 independent, historical `media_downloads` audit table without altering the original
-provenance or usage tables.
+provenance or usage tables. Phase 2B migration `0003_local_locations` adds the narrowly
+scoped `media_locations` table for multiple local paths, origin, availability, efficient
+unchanged-file checks, and missing/restored timestamps. Prior migrations remain unchanged.

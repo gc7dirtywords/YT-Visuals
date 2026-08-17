@@ -1,18 +1,28 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from dataclasses import replace
 
 import httpx
 import pytest
+from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from yt_visuals.acquisition import AcquisitionService, ProbeResult, safe_filename
 from yt_visuals.config import Settings
 from yt_visuals.database import initialize_database
-from yt_visuals.models import AssetLicense, MediaAsset, MediaDownload, MediaProvider, MediaSource
+from yt_visuals.library import LibraryScanner
+from yt_visuals.models import (
+    AssetLicense,
+    MediaAsset,
+    MediaDownload,
+    MediaLocation,
+    MediaProvider,
+    MediaSource,
+)
 from yt_visuals.providers.base import MediaSearchResult
 from yt_visuals.providers.errors import MediaDownloadError
 
@@ -325,4 +335,46 @@ def test_video_ffprobe_metadata_overrides_provider_values(catalog_settings: Sett
         assert (asset.width, asset.height, asset.duration_ms) == (1920, 1080, 12_500)
         assert asset.relative_path.startswith("Library/Videos/")
         assert asset.technical_metadata["download"]["ffprobe"] == {"format": {}}
+    engine.dispose()
+
+
+def test_local_asset_later_receives_provider_provenance_without_second_asset(
+    catalog_settings: Settings,
+) -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 16), "blue").save(buffer, format="JPEG")
+    content = buffer.getvalue()
+    local_path = catalog_settings.root / "Library/Images/preexisting.jpg"
+    local_path.write_bytes(content)
+    engine = initialize_database(catalog_settings)
+    LibraryScanner(catalog_settings, engine).scan()
+
+    service = AcquisitionService(
+        catalog_settings,
+        engine,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, headers={"Content-Type": "image/jpeg"}, content=content
+                )
+            )
+        ),
+    )
+    outcome = service.acquire(photo_result("88"))
+    assert outcome.duplicate_reason == "sha256"
+    assert outcome.created_source is True
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 1
+        assert session.scalar(select(func.count()).select_from(MediaLocation)) == 1
+        assert session.scalar(select(func.count()).select_from(MediaSource)) == 1
+        asset = session.scalar(select(MediaAsset))
+        assert asset is not None
+        assert asset.locations[0].provenance_type == "local_import"
+        assert asset.sources[0].provider.name == "pexels"
+        assert asset.license is not None
+        assert asset.license.license_name == "Pexels License"
+    assert [path.name for path in (catalog_settings.root / "Library/Images").iterdir()] == [
+        "preexisting.jpg"
+    ]
+    service.close()
     engine.dispose()

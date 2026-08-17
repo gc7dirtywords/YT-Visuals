@@ -5,11 +5,13 @@ import json
 from collections.abc import Callable
 
 from sqlalchemy import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from .acquisition import AcquisitionOutcome, AcquisitionService
 from .config import Settings
 from .database import initialize_database
 from .doctor import all_checks_pass, run_doctor
+from .library import LibraryScanner, LibrarySearchFilters, get_library_status, search_library
 from .providers.base import MediaProvider, MediaSearchResult, SearchPage
 from .providers.errors import ProviderError
 from .providers.registry import create_provider, list_providers
@@ -49,6 +51,31 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("media_kind", choices=("photos", "videos"))
     download.add_argument("provider_asset_id")
     download.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    library = subparsers.add_parser("library", help="Scan and search the local media library")
+    library_subparsers = library.add_subparsers(dest="library_command", required=True)
+    library_scan = library_subparsers.add_parser("scan", help="Reconcile local files with the catalog")
+    library_scan.add_argument("--dry-run", action="store_true", help="Inspect and report without database changes")
+    library_scan.add_argument("--verbose", action="store_true", help="List individual scan actions")
+    library_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    library_status = library_subparsers.add_parser("status", help="Summarize the local catalog")
+    library_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    library_search = library_subparsers.add_parser("search", help="Search cataloged local media")
+    library_search.add_argument("query", nargs="?", default="")
+    library_search.add_argument("--type", dest="media_type", choices=("image", "video"))
+    library_search.add_argument("--orientation", choices=("landscape", "portrait", "square"))
+    usage = library_search.add_mutually_exclusive_group()
+    usage.add_argument("--unused", action="store_true")
+    usage.add_argument("--used", action="store_true")
+    library_search.add_argument("--missing", action="store_true")
+    library_search.add_argument("--provider")
+    library_search.add_argument("--mime")
+    library_search.add_argument("--min-width", type=int)
+    library_search.add_argument("--min-height", type=int)
+    library_search.add_argument("--min-duration", type=float, help="Minimum video duration in seconds")
+    library_search.add_argument("--max-duration", type=float, help="Maximum video duration in seconds")
+    library_search.add_argument("--limit", type=int, default=100)
+    library_search.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     return parser
 
 
@@ -93,11 +120,100 @@ def cli(
 
         if args.command == "download":
             return _download(args, settings, provider_factory, acquisition_factory)
-    except ProviderError as exc:
+
+        if args.command == "library":
+            return _library(args, settings)
+    except (ProviderError, SQLAlchemyError, OSError, RuntimeError) as exc:
         print(f"Error: {exc}")
         return 1
 
     return 2
+
+
+def _library(args: argparse.Namespace, settings: Settings) -> int:
+    engine = initialize_database(settings)
+    try:
+        if args.library_command == "scan":
+            summary = LibraryScanner(settings, engine).scan(
+                dry_run=args.dry_run, verbose=args.verbose
+            )
+            if args.json:
+                print(json.dumps(summary.to_dict(), indent=2))
+            else:
+                prefix = "Dry run; " if summary.dry_run else ""
+                print(
+                    f"{prefix}scanned {summary.files_scanned} supported file(s): "
+                    f"{summary.new_assets} new, {summary.existing_assets} existing, "
+                    f"{summary.duplicate_hashes} duplicate hash(es), "
+                    f"{summary.moved_paths} moved path(s), {summary.missing_assets} missing asset(s), "
+                    f"{summary.error_count} error(s)."
+                )
+                if args.verbose:
+                    for action in summary.actions:
+                        print(f"  {action}")
+                for error in summary.errors:
+                    print(f"  ERROR {error.relative_path}: {error.category}: {error.message}")
+            return 1 if summary.error_count else 0
+
+        if args.library_command == "status":
+            status = get_library_status(engine)
+            if args.json:
+                print(json.dumps(status.to_dict(), indent=2))
+            else:
+                print(
+                    f"Assets: {status.total_assets} total, {status.active_assets} active, "
+                    f"{status.missing_assets} missing, {status.unused_assets} unused"
+                )
+                print(f"Media: {status.images} image(s), {status.videos} video(s)")
+                print(
+                    f"Locations: {status.available_locations} available, "
+                    f"{status.missing_locations} missing, {status.duplicate_locations} duplicate copy/copies"
+                )
+                print(f"Available bytes: {status.total_bytes}")
+            return 0
+
+        usage = "unused" if args.unused else "used" if args.used else None
+        filters = LibrarySearchFilters(
+            media_type=args.media_type,
+            orientation=args.orientation,
+            usage=usage,
+            missing=args.missing,
+            provider=args.provider,
+            mime_type=args.mime,
+            min_width=args.min_width,
+            min_height=args.min_height,
+            min_duration_ms=_seconds_to_ms(args.min_duration),
+            max_duration_ms=_seconds_to_ms(args.max_duration),
+            limit=args.limit,
+        )
+        results = search_library(engine, args.query, filters)
+        if args.json:
+            print(json.dumps([item.to_dict() for item in results], indent=2))
+        else:
+            print(f"{len(results)} catalog result(s).")
+            for item in results:
+                dimensions = (
+                    f"{item.width}x{item.height}" if item.width and item.height else "dimensions unknown"
+                )
+                duration = f", {item.duration_ms / 1000:g}s" if item.duration_ms is not None else ""
+                print(f"\n{item.id}: {item.relative_path}")
+                print(f"  {item.media_type}; {item.mime_type or 'MIME unknown'}; {dimensions}{duration}")
+                print(f"  {item.status}; used {item.usage_count} time(s); SHA-256 {item.sha256 or 'unknown'}")
+                if item.providers:
+                    print(f"  Providers: {', '.join(item.providers)}")
+                if len(item.locations) > 1:
+                    print(f"  Locations: {', '.join(item.locations)}")
+        return 0
+    finally:
+        engine.dispose()
+
+
+def _seconds_to_ms(value: float | None) -> int | None:
+    if value is None:
+        return None
+    if value < 0:
+        raise ProviderError("duration filters must be nonnegative")
+    return round(value * 1000)
 
 
 def _search(args: argparse.Namespace, settings: Settings, provider_factory: ProviderFactory) -> int:

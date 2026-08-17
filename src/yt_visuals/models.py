@@ -115,6 +115,53 @@ class MediaAsset(TimestampMixin, Base):
         back_populates="asset", cascade="all, delete-orphan"
     )
     downloads: Mapped[list["MediaDownload"]] = relationship(back_populates="asset")
+    locations: Mapped[list["MediaLocation"]] = relationship(
+        back_populates="asset", cascade="all, delete-orphan"
+    )
+
+
+class MediaLocation(TimestampMixin, Base):
+    __tablename__ = "media_locations"
+    __table_args__ = (
+        CheckConstraint("status IN ('available', 'missing')", name="status"),
+        CheckConstraint(
+            "provenance_type IN ('local_import', 'provider_download')", name="provenance_type"
+        ),
+        CheckConstraint("length(trim(relative_path)) > 0", name="relative_path_not_empty"),
+        CheckConstraint("relative_path NOT LIKE '/%'", name="relative_path_not_posix_absolute"),
+        CheckConstraint("relative_path NOT GLOB '[A-Za-z]:*'", name="relative_path_not_drive_absolute"),
+        CheckConstraint(
+            "substr(relative_path, 1, 1) != char(92)", name="relative_path_not_backslash_absolute"
+        ),
+        CheckConstraint("file_size_bytes IS NULL OR file_size_bytes >= 0", name="file_size_nonnegative"),
+        CheckConstraint("file_modified_ns IS NULL OR file_modified_ns >= 0", name="modified_ns_nonnegative"),
+        Index("ix_media_locations_asset_status", "media_asset_id", "status"),
+        Index("ix_media_locations_status_last_seen", "status", "last_seen_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    media_asset_id: Mapped[int] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="CASCADE"), nullable=False
+    )
+    relative_path: Mapped[str] = mapped_column(
+        String(1024, collation="NOCASE"), nullable=False, unique=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="available", server_default="available"
+    )
+    provenance_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    file_modified_ns: Mapped[int | None] = mapped_column(Integer)
+    file_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    missing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    asset: Mapped[MediaAsset] = relationship(back_populates="locations")
 
 
 class MediaProvider(TimestampMixin, Base):

@@ -20,7 +20,14 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .models import AssetLicense, MediaAsset, MediaDownload, MediaProvider, MediaSource
+from .models import (
+    AssetLicense,
+    MediaAsset,
+    MediaDownload,
+    MediaLocation,
+    MediaProvider,
+    MediaSource,
+)
 from .providers.base import MediaSearchResult
 from .providers.errors import MediaDownloadError
 
@@ -234,6 +241,8 @@ class AcquisitionService:
                 os.replace(downloaded.temporary_path, destination)
 
                 relative_path = destination.relative_to(self.settings.root).as_posix()
+                destination_stat = destination.stat()
+                observed_at = _utcnow()
                 asset = MediaAsset(
                     relative_path=relative_path,
                     media_type=result.media_type,
@@ -245,8 +254,8 @@ class AcquisitionService:
                     width=probe.width or result.width,
                     height=probe.height or result.height,
                     duration_ms=probe.duration_ms if probe.duration_ms is not None else result.duration_ms,
-                    file_modified_at=datetime.fromtimestamp(destination.stat().st_mtime, tz=timezone.utc),
-                    last_verified_at=_utcnow(),
+                    file_modified_at=datetime.fromtimestamp(destination_stat.st_mtime, tz=timezone.utc),
+                    last_verified_at=observed_at,
                     technical_metadata={
                         "provider": _sanitize_metadata(result.raw_metadata),
                         "download": {
@@ -258,6 +267,21 @@ class AcquisitionService:
                 )
                 session.add(asset)
                 session.flush()
+                session.add(
+                    MediaLocation(
+                        asset=asset,
+                        relative_path=relative_path,
+                        status="available",
+                        provenance_type="provider_download",
+                        file_size_bytes=destination_stat.st_size,
+                        file_modified_ns=destination_stat.st_mtime_ns,
+                        file_modified_at=datetime.fromtimestamp(
+                            destination_stat.st_mtime, tz=timezone.utc
+                        ),
+                        first_seen_at=observed_at,
+                        last_seen_at=observed_at,
+                    )
+                )
                 self._attach_source(session, asset, result)
                 self._attach_license_if_missing(asset, result)
                 self._complete_history(
