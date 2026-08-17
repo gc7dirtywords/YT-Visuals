@@ -50,3 +50,8 @@ class Settings:
     def migrations_dir(self) -> Path:
         return self.root / "migrations"
 
+    @property
+    def pexels_api_key(self) -> str | None:
+        value = os.environ.get("PEXELS_API_KEY", "").strip()
+        return value or None
+

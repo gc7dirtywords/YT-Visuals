@@ -18,6 +18,7 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         "asset_tags",
         "asset_usages",
         "media_assets",
+        "media_downloads",
         "media_providers",
         "media_sources",
         "projects",
@@ -30,7 +31,7 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         status = get_migration_status(catalog_settings, connection)
         assert status.is_current
-        assert status.current_revision == "0001_initial"
+        assert status.current_revision == "0002_download_history"
 
     engine.dispose()
 
@@ -40,4 +41,3 @@ def test_database_initialization_is_idempotent(catalog_settings: Settings) -> No
     first_engine.dispose()
     second_engine = initialize_database(catalog_settings)
     second_engine.dispose()
-

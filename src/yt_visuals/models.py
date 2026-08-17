@@ -114,6 +114,7 @@ class MediaAsset(TimestampMixin, Base):
     usages: Mapped[list["AssetUsage"]] = relationship(
         back_populates="asset", cascade="all, delete-orphan"
     )
+    downloads: Mapped[list["MediaDownload"]] = relationship(back_populates="asset")
 
 
 class MediaProvider(TimestampMixin, Base):
@@ -151,6 +152,69 @@ class MediaSource(TimestampMixin, Base):
 
     asset: Mapped[MediaAsset] = relationship(back_populates="sources")
     provider: Mapped[MediaProvider | None] = relationship(back_populates="sources")
+
+
+class MediaDownload(TimestampMixin, Base):
+    __tablename__ = "media_downloads"
+    __table_args__ = (
+        CheckConstraint("media_type IN ('image', 'video')", name="media_type"),
+        CheckConstraint(
+            "status IN ('started', 'success', 'failed', 'duplicate', 'reused')", name="status"
+        ),
+        CheckConstraint("length(trim(provider)) > 0", name="provider_not_empty"),
+        CheckConstraint("length(trim(provider_asset_id)) > 0", name="provider_asset_id_not_empty"),
+        CheckConstraint("downloaded_bytes IS NULL OR downloaded_bytes >= 0", name="bytes_nonnegative"),
+        CheckConstraint(
+            "http_status_code IS NULL OR http_status_code BETWEEN 100 AND 599",
+            name="http_status_range",
+        ),
+        CheckConstraint("sha256 IS NULL OR length(sha256) = 64", name="sha256_length"),
+        CheckConstraint("sha256 IS NULL OR sha256 NOT GLOB '*[^0-9a-f]*'", name="sha256_lower_hex"),
+        CheckConstraint(
+            "relative_path IS NULL OR relative_path NOT LIKE '/%'", name="path_not_posix_absolute"
+        ),
+        CheckConstraint(
+            "relative_path IS NULL OR relative_path NOT GLOB '[A-Za-z]:*'",
+            name="path_not_drive_absolute",
+        ),
+        CheckConstraint(
+            "relative_path IS NULL OR substr(relative_path, 1, 1) != char(92)",
+            name="path_not_backslash_absolute",
+        ),
+        CheckConstraint(
+            "completed_at IS NULL OR completed_at >= attempted_at", name="completed_after_attempted"
+        ),
+        Index("ix_media_downloads_provider_asset_attempted", "provider", "provider_asset_id", "attempted_at"),
+        Index("ix_media_downloads_status_attempted", "status", "attempted_at"),
+        Index("ix_media_downloads_media_asset_id", "media_asset_id"),
+        Index("ix_media_downloads_sha256", "sha256"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(100, collation="NOCASE"), nullable=False)
+    provider_asset_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(String(2048))
+    download_url: Mapped[str | None] = mapped_column(String(4096))
+    attempted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="started", server_default="started")
+    media_asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="SET NULL")
+    )
+    relative_path: Mapped[str | None] = mapped_column(String(1024))
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    downloaded_bytes: Mapped[int | None] = mapped_column(Integer)
+    http_status_code: Mapped[int | None] = mapped_column(Integer)
+    content_type: Mapped[str | None] = mapped_column(String(255))
+    error_category: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    provider_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    request_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    asset: Mapped[MediaAsset | None] = relationship(back_populates="downloads")
 
 
 class AssetLicense(TimestampMixin, Base):
