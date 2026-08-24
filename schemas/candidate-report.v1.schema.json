@@ -1,0 +1,1130 @@
+{
+  "$defs": {
+    "CandidateReportBeat": {
+      "additionalProperties": false,
+      "properties": {
+        "beat_id": {
+          "title": "Beat Id",
+          "type": "string"
+        },
+        "blocked_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportBlockedReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/ReportCandidate"
+          },
+          "maxItems": 1,
+          "title": "Candidates",
+          "type": "array"
+        },
+        "lock": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportLock"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_snapshot": {
+          "$ref": "#/$defs/ReportRequestSnapshot"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "review_required",
+            "locked_accepted",
+            "blocked_no_candidate",
+            "blocked_missing"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "beat_id",
+        "sequence",
+        "state",
+        "request_snapshot",
+        "candidates",
+        "blocked_reason",
+        "lock"
+      ],
+      "title": "CandidateReportBeat",
+      "type": "object"
+    },
+    "DesiredVisual": {
+      "additionalProperties": false,
+      "properties": {
+        "composition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Composition"
+        },
+        "historical_era": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Historical Era"
+        },
+        "mood": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mood"
+        },
+        "setting": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Setting"
+        },
+        "subjects": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Subjects",
+          "type": "array"
+        },
+        "summary": {
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "DesiredVisual",
+      "type": "object"
+    },
+    "ExpectedArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "relative_path": {
+          "title": "Relative Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "relative_path"
+      ],
+      "title": "ExpectedArtifact",
+      "type": "object"
+    },
+    "ReportBlockedReason": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "no_local_matches",
+            "all_matches_excluded",
+            "no_technically_eligible_matches",
+            "preview_generation_failed",
+            "file_unavailable",
+            "asset_hash_mismatch",
+            "catalog_identity_mismatch"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "explanation": {
+          "title": "Explanation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "explanation"
+      ],
+      "title": "ReportBlockedReason",
+      "type": "object"
+    },
+    "ReportCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "exclusiveMinimum": 0,
+          "title": "Asset Id",
+          "type": "integer"
+        },
+        "asset_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Asset Sha256",
+          "type": "string"
+        },
+        "available": {
+          "title": "Available",
+          "type": "boolean"
+        },
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "catalog_status": {
+          "enum": [
+            "existing_local",
+            "previously_downloaded",
+            "newly_downloaded"
+          ],
+          "title": "Catalog Status",
+          "type": "string"
+        },
+        "license": {
+          "$ref": "#/$defs/ReportLicense"
+        },
+        "media_type": {
+          "enum": [
+            "image",
+            "video"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ReportProvenance"
+        },
+        "relative_path": {
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "retrieval": {
+          "$ref": "#/$defs/ReportRetrieval"
+        },
+        "storyboard_visuals": {
+          "$ref": "#/$defs/StoryboardVisuals"
+        },
+        "technical": {
+          "$ref": "#/$defs/ReportTechnical"
+        },
+        "usage": {
+          "$ref": "#/$defs/ReportUsage"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "asset_id",
+        "asset_sha256",
+        "media_type",
+        "catalog_status",
+        "relative_path",
+        "available",
+        "technical",
+        "provenance",
+        "license",
+        "usage",
+        "retrieval",
+        "storyboard_visuals"
+      ],
+      "title": "ReportCandidate",
+      "type": "object"
+    },
+    "ReportLicense": {
+      "additionalProperties": false,
+      "properties": {
+        "attribution_required": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Attribution Required"
+        },
+        "attribution_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Attribution Text"
+        },
+        "commercial_use_allowed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Commercial Use Allowed"
+        },
+        "license_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "License Name"
+        },
+        "license_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "License Url"
+        },
+        "modifications_allowed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Modifications Allowed"
+        },
+        "status": {
+          "enum": [
+            "known",
+            "unknown",
+            "restricted"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "license_name",
+        "license_url",
+        "attribution_required",
+        "attribution_text",
+        "commercial_use_allowed",
+        "modifications_allowed"
+      ],
+      "title": "ReportLicense",
+      "type": "object"
+    },
+    "ReportLock": {
+      "additionalProperties": false,
+      "properties": {
+        "alignment_score": {
+          "maximum": 100,
+          "minimum": 90,
+          "title": "Alignment Score",
+          "type": "integer"
+        },
+        "asset_id": {
+          "exclusiveMinimum": 0,
+          "title": "Asset Id",
+          "type": "integer"
+        },
+        "asset_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Asset Sha256",
+          "type": "string"
+        },
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "locked_at": {
+          "title": "Locked At",
+          "type": "string"
+        },
+        "review_id": {
+          "title": "Review Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "review_id",
+        "candidate_id",
+        "asset_id",
+        "asset_sha256",
+        "alignment_score",
+        "locked_at"
+      ],
+      "title": "ReportLock",
+      "type": "object"
+    },
+    "ReportProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "creator_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Creator Name"
+        },
+        "creator_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Creator Url"
+        },
+        "origin": {
+          "enum": [
+            "local_import",
+            "provider_download"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Provider"
+        },
+        "provider_asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Provider Asset Id"
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Url"
+        }
+      },
+      "required": [
+        "origin",
+        "provider",
+        "provider_asset_id",
+        "source_url",
+        "creator_name",
+        "creator_url"
+      ],
+      "title": "ReportProvenance",
+      "type": "object"
+    },
+    "ReportRequestSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "avoid": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Avoid",
+          "type": "array"
+        },
+        "desired_visual": {
+          "$ref": "#/$defs/DesiredVisual"
+        },
+        "media_preference": {
+          "enum": [
+            "image",
+            "video",
+            "either"
+          ],
+          "title": "Media Preference",
+          "type": "string"
+        },
+        "must_have": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Must Have",
+          "type": "array"
+        },
+        "narration_context": {
+          "title": "Narration Context",
+          "type": "string"
+        },
+        "preferred": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Preferred",
+          "type": "array"
+        },
+        "prior_usage_policy": {
+          "enum": [
+            "prefer_unused",
+            "allow_prior_usage",
+            "forbid_prior_usage"
+          ],
+          "title": "Prior Usage Policy",
+          "type": "string"
+        },
+        "repeat_within_story": {
+          "title": "Repeat Within Story",
+          "type": "boolean"
+        },
+        "search_concepts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Search Concepts",
+          "type": "array"
+        },
+        "search_directives": {
+          "items": {
+            "$ref": "#/$defs/SearchDirective"
+          },
+          "title": "Search Directives",
+          "type": "array"
+        },
+        "technical_constraints": {
+          "$ref": "#/$defs/TechnicalConstraints"
+        },
+        "timing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "timing",
+        "narration_context",
+        "desired_visual",
+        "media_preference",
+        "search_concepts",
+        "search_directives",
+        "must_have",
+        "preferred",
+        "avoid",
+        "prior_usage_policy",
+        "repeat_within_story",
+        "technical_constraints"
+      ],
+      "title": "ReportRequestSnapshot",
+      "type": "object"
+    },
+    "ReportRetrieval": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "rank": {
+          "minimum": 1,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "retrieval_score": {
+          "title": "Retrieval Score",
+          "type": "integer"
+        },
+        "score_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Score Reasons",
+          "type": "array"
+        },
+        "stage": {
+          "const": "local",
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "query",
+        "rank",
+        "retrieval_score",
+        "score_reasons"
+      ],
+      "title": "ReportRetrieval",
+      "type": "object"
+    },
+    "ReportStory": {
+      "additionalProperties": false,
+      "properties": {
+        "story_id": {
+          "title": "Story Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "story_id",
+        "title"
+      ],
+      "title": "ReportStory",
+      "type": "object"
+    },
+    "ReportSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "blocked_missing": {
+          "minimum": 0,
+          "title": "Blocked Missing",
+          "type": "integer"
+        },
+        "blocked_no_candidate": {
+          "minimum": 0,
+          "title": "Blocked No Candidate",
+          "type": "integer"
+        },
+        "locked_accepted": {
+          "minimum": 0,
+          "title": "Locked Accepted",
+          "type": "integer"
+        },
+        "review_required": {
+          "minimum": 0,
+          "title": "Review Required",
+          "type": "integer"
+        },
+        "total_beats": {
+          "minimum": 1,
+          "title": "Total Beats",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_beats",
+        "review_required",
+        "locked_accepted",
+        "blocked_no_candidate",
+        "blocked_missing"
+      ],
+      "title": "ReportSummary",
+      "type": "object"
+    },
+    "ReportTechnical": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "file_size_bytes": {
+          "minimum": 0,
+          "title": "File Size Bytes",
+          "type": "integer"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Mime Type"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mime_type",
+        "width",
+        "height",
+        "file_size_bytes"
+      ],
+      "title": "ReportTechnical",
+      "type": "object"
+    },
+    "ReportUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "last_used_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Used At"
+        },
+        "recent_usage_references": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recent Usage References",
+          "type": "array"
+        },
+        "usage_count": {
+          "minimum": 0,
+          "title": "Usage Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "usage_count",
+        "last_used_at",
+        "recent_usage_references"
+      ],
+      "title": "ReportUsage",
+      "type": "object"
+    },
+    "SearchDirective": {
+      "additionalProperties": false,
+      "properties": {
+        "excluded_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Excluded Terms",
+          "type": "array"
+        },
+        "filters": {
+          "$ref": "#/$defs/SearchFilters"
+        },
+        "media_type": {
+          "enum": [
+            "image",
+            "video",
+            "either"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "query": {
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "required_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "query",
+        "media_type"
+      ],
+      "title": "SearchDirective",
+      "type": "object"
+    },
+    "SearchFilters": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum Duration Ms"
+        },
+        "minimum_duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Duration Ms"
+        },
+        "minimum_height": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Height"
+        },
+        "minimum_width": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Width"
+        },
+        "orientation": {
+          "anyOf": [
+            {
+              "enum": [
+                "landscape",
+                "portrait",
+                "square"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orientation"
+        }
+      },
+      "title": "SearchFilters",
+      "type": "object"
+    },
+    "StoryboardVisuals": {
+      "additionalProperties": false,
+      "properties": {
+        "poster_frame_path": {
+          "title": "Poster Frame Path",
+          "type": "string"
+        },
+        "video_frames": {
+          "items": {
+            "$ref": "#/$defs/VideoFrame"
+          },
+          "title": "Video Frames",
+          "type": "array"
+        }
+      },
+      "required": [
+        "poster_frame_path",
+        "video_frames"
+      ],
+      "title": "StoryboardVisuals",
+      "type": "object"
+    },
+    "TechnicalConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "minimum_height": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Height"
+        },
+        "minimum_width": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Width"
+        },
+        "orientation": {
+          "default": "any",
+          "enum": [
+            "any",
+            "landscape",
+            "portrait",
+            "square"
+          ],
+          "title": "Orientation",
+          "type": "string"
+        },
+        "video_duration_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VideoDuration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TechnicalConstraints",
+      "type": "object"
+    },
+    "Timing": {
+      "additionalProperties": false,
+      "properties": {
+        "end_ms": {
+          "exclusiveMinimum": 0,
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "precision": {
+          "enum": [
+            "exact",
+            "estimated"
+          ],
+          "title": "Precision",
+          "type": "string"
+        },
+        "start_ms": {
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms",
+        "precision"
+      ],
+      "title": "Timing",
+      "type": "object"
+    },
+    "VideoDuration": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        }
+      },
+      "title": "VideoDuration",
+      "type": "object"
+    },
+    "VideoFrame": {
+      "additionalProperties": false,
+      "properties": {
+        "relative_path": {
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "timestamp_ms": {
+          "minimum": 0,
+          "title": "Timestamp Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relative_path",
+        "timestamp_ms"
+      ],
+      "title": "VideoFrame",
+      "type": "object"
+    }
+  },
+  "$id": "https://yt-visuals.local/schemas/candidate-report.v1.schema.json",
+  "additionalProperties": false,
+  "properties": {
+    "beats": {
+      "items": {
+        "$ref": "#/$defs/CandidateReportBeat"
+      },
+      "minItems": 1,
+      "title": "Beats",
+      "type": "array"
+    },
+    "contract_version": {
+      "const": 1,
+      "title": "Contract Version",
+      "type": "integer"
+    },
+    "document_type": {
+      "const": "candidate_report",
+      "title": "Document Type",
+      "type": "string"
+    },
+    "expected_review_template": {
+      "$ref": "#/$defs/ExpectedArtifact"
+    },
+    "expected_storyboard": {
+      "$ref": "#/$defs/ExpectedArtifact"
+    },
+    "generated_at": {
+      "title": "Generated At",
+      "type": "string"
+    },
+    "iteration": {
+      "minimum": 1,
+      "title": "Iteration",
+      "type": "integer"
+    },
+    "package_id": {
+      "title": "Package Id",
+      "type": "string"
+    },
+    "request_document_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Request Document Sha256",
+      "type": "string"
+    },
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
+    },
+    "request_revision": {
+      "minimum": 1,
+      "title": "Request Revision",
+      "type": "integer"
+    },
+    "review_id": {
+      "title": "Review Id",
+      "type": "string"
+    },
+    "review_threshold": {
+      "const": 90,
+      "title": "Review Threshold",
+      "type": "integer"
+    },
+    "story": {
+      "$ref": "#/$defs/ReportStory"
+    },
+    "summary": {
+      "$ref": "#/$defs/ReportSummary"
+    },
+    "workflow_id": {
+      "title": "Workflow Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "document_type",
+    "contract_version",
+    "workflow_id",
+    "request_id",
+    "request_revision",
+    "request_document_sha256",
+    "package_id",
+    "review_id",
+    "iteration",
+    "generated_at",
+    "story",
+    "review_threshold",
+    "expected_storyboard",
+    "expected_review_template",
+    "summary",
+    "beats"
+  ],
+  "title": "CandidateReport",
+  "type": "object"
+}

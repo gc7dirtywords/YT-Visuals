@@ -8,6 +8,68 @@ provider.
 The project does not yet support Pixabay, generate manifests, use AI services, automate
 DaVinci Resolve, or assemble video.
 
+## Phase 4: manual visual-review workflow
+
+YT-Visuals is not an AI application. Story interpretation, beat selection, editorial
+judgment, and visual alignment scoring belong to a normal ChatGPT Project outside this
+repository. YT-Visuals only validates structured handoff files, searches the local
+catalog deterministically, creates review artifacts, and applies explicit structured
+review decisions. It makes no OpenAI or LLM calls and performs no semantic interpretation.
+
+The Phase 4 handoff is entirely manual and file based:
+
+1. ChatGPT creates a strict `visual_request` JSON document from a finished story.
+2. YT-Visuals starts a workflow and searches existing local catalog media first.
+3. YT-Visuals writes a machine-readable Candidate Report, a visual storyboard PDF, and
+   an editable Review Template under `Projects/VisualWorkflows/<workflow-id>/`.
+4. The user uploads the storyboard and request context to ChatGPT for visual review.
+5. ChatGPT returns a completed `visual_review` JSON document.
+6. YT-Visuals imports the review, locks accepted beats, and locally re-sources only
+   rejected or search-blocked beats. The cycle repeats until all beats are locked.
+
+An accepted candidate requires an integer alignment score of at least 90. A score below
+90 must request replacement; a score of 90 or more may still request replacement. The
+application validates these rules but never calculates the score. Accepted locks persist
+across request revisions only when the stable beat ID and canonical compatibility
+fingerprint remain unchanged.
+
+`blocked_no_candidate` means deterministic local search found no eligible candidate. Its
+Review Template entry asks for explicit revised search directives and may return to
+sourcing. `blocked_missing` means an already locked asset disappeared or changed bytes;
+the lock is retained, the beat has no editable review entry, and normal sourcing cannot
+replace it.
+
+Structured licenses permitting commercial use and modification are eligible. Missing or
+insufficient structured license data remains eligible for visual review but is visibly
+marked `LICENSE: UNKNOWN`; a structured prohibition excludes the asset. Publication-time
+license clearance is not implemented. Automatic Pexels/Pixabay fallback is also deferred;
+Phase 4 workflow sourcing is local only even though the existing explicit provider CLI
+remains available.
+
+The immutable v1 contract schemas are stored in `schemas/`. Validate and run the manual
+workflow from PowerShell:
+
+```powershell
+.\.venv\Scripts\yt-visuals.exe visual request validate .\request.json --json
+.\.venv\Scripts\yt-visuals.exe visual workflow start .\request.json
+.\.venv\Scripts\yt-visuals.exe visual workflow source <workflow-id>
+.\.venv\Scripts\yt-visuals.exe visual workflow status <workflow-id>
+.\.venv\Scripts\yt-visuals.exe visual workflow artifacts <workflow-id>
+.\.venv\Scripts\yt-visuals.exe visual workflow review <workflow-id> .\completed-review.json
+```
+
+Import an intentional request revision with the explicit workflow ID; matching
+`story_id` alone never selects a workflow:
+
+```powershell
+.\.venv\Scripts\yt-visuals.exe visual workflow revise <workflow-id> .\request-v2.json
+```
+
+Only explicit `search_directives`, filters, media preference, technical constraints,
+prior-usage policy, repeat policy, and recorded correction directives affect retrieval.
+Narration, requested-visual prose, concepts, and editorial criteria are retained for
+human review but are never converted into search behavior.
+
 ## Media service layer
 
 `yt_visuals.services.MediaCatalogService` is the application boundary for catalog reads

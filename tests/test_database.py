@@ -17,6 +17,11 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         "asset_licenses",
         "asset_tags",
         "asset_usages",
+        "asset_review_annotations",
+        "beat_asset_rejections",
+        "beat_candidates",
+        "beat_selections",
+        "candidate_packages",
         "media_assets",
         "media_downloads",
         "media_locations",
@@ -25,6 +30,13 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         "projects",
         "stories",
         "tags",
+        "visual_beat_revisions",
+        "visual_beats",
+        "visual_request_revisions",
+        "visual_review_entries",
+        "visual_review_templates",
+        "visual_reviews",
+        "visual_workflows",
     }
     assert expected_tables == set(inspect(engine).get_table_names())
 
@@ -32,7 +44,7 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         status = get_migration_status(catalog_settings, connection)
         assert status.is_current
-        assert status.current_revision == "0004_usage_context"
+        assert status.current_revision == "0005_visual_workflow"
 
     engine.dispose()
 

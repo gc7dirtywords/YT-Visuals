@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -390,3 +391,285 @@ class AssetUsage(TimestampMixin, Base):
     asset: Mapped[MediaAsset] = relationship(back_populates="usages")
     project: Mapped[Project | None] = relationship(back_populates="asset_usages")
     story: Mapped[Story | None] = relationship(back_populates="asset_usages")
+
+
+class VisualWorkflow(TimestampMixin, Base):
+    __tablename__ = "visual_workflows"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'complete', 'blocked')", name="status"
+        ),
+        CheckConstraint("length(trim(story_external_id)) > 0", name="story_external_id_not_empty"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    story_external_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+
+
+class VisualRequestRevision(TimestampMixin, Base):
+    __tablename__ = "visual_request_revisions"
+    __table_args__ = (
+        CheckConstraint("revision > 0", name="revision_positive"),
+        CheckConstraint("length(document_sha256) = 64", name="document_sha256_length"),
+        UniqueConstraint("workflow_id", "revision", name="uq_visual_request_revisions_workflow_revision"),
+        Index("ix_visual_request_revisions_workflow_revision", "workflow_id", "revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class VisualBeat(TimestampMixin, Base):
+    __tablename__ = "visual_beats"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending', 'sourcing', 'review_required', 'rejected', "
+            "'blocked_no_candidate', 'accepted_locked', 'blocked_missing')",
+            name="state",
+        ),
+        UniqueConstraint("workflow_id", "external_beat_id", name="uq_visual_beats_workflow_external"),
+        Index("ix_visual_beats_workflow_state", "workflow_id", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    external_beat_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default="pending")
+
+
+class VisualBeatRevision(TimestampMixin, Base):
+    __tablename__ = "visual_beat_revisions"
+    __table_args__ = (
+        CheckConstraint("sequence > 0", name="sequence_positive"),
+        CheckConstraint("length(lock_compatibility_sha256) = 64", name="compatibility_sha256_length"),
+        UniqueConstraint("request_revision_id", "beat_id", name="uq_visual_beat_revisions_request_beat"),
+        UniqueConstraint("request_revision_id", "sequence", name="uq_visual_beat_revisions_request_sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_request_revisions.id", ondelete="CASCADE"), nullable=False
+    )
+    beat_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_beats.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    specification_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    lock_compatibility_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class CandidatePackage(TimestampMixin, Base):
+    __tablename__ = "candidate_packages"
+    __table_args__ = (
+        CheckConstraint("iteration > 0", name="iteration_positive"),
+        CheckConstraint(
+            "status IN ('building', 'awaiting_review', 'reviewed', 'generation_failed')",
+            name="status",
+        ),
+        UniqueConstraint("workflow_id", "iteration", name="uq_candidate_packages_workflow_iteration"),
+        UniqueConstraint("review_id", name="uq_candidate_packages_review_id"),
+        Index("ix_candidate_packages_workflow_status", "workflow_id", "status"),
+        Index(
+            "uq_candidate_packages_one_awaiting",
+            "workflow_id",
+            unique=True,
+            sqlite_where=text("status = 'awaiting_review'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    request_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_request_revisions.id", ondelete="RESTRICT"), nullable=False
+    )
+    iteration: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="building", server_default="building")
+    candidate_report_path: Mapped[str | None] = mapped_column(String(1024))
+    candidate_report_sha256: Mapped[str | None] = mapped_column(String(64))
+    storyboard_path: Mapped[str | None] = mapped_column(String(1024))
+    storyboard_sha256: Mapped[str | None] = mapped_column(String(64))
+    review_template_path: Mapped[str | None] = mapped_column(String(1024))
+    review_template_sha256: Mapped[str | None] = mapped_column(String(64))
+    review_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BeatCandidate(TimestampMixin, Base):
+    __tablename__ = "beat_candidates"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('proposed', 'rejected', 'accepted', 'locked_carried')", name="status"
+        ),
+        UniqueConstraint("package_id", "beat_id", name="uq_beat_candidates_package_beat"),
+        Index("ix_beat_candidates_beat_asset", "beat_id", "asset_id"),
+        Index("ix_beat_candidates_package_status", "package_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    package_id: Mapped[str] = mapped_column(
+        ForeignKey("candidate_packages.id", ondelete="CASCADE"), nullable=False
+    )
+    beat_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_beats.id", ondelete="CASCADE"), nullable=False
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), nullable=False
+    )
+    asset_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="proposed", server_default="proposed")
+    retrieval_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    preview_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class VisualReviewTemplate(TimestampMixin, Base):
+    __tablename__ = "visual_review_templates"
+    __table_args__ = (UniqueConstraint("package_id", name="uq_visual_review_templates_package"),)
+
+    review_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    package_id: Mapped[str] = mapped_column(
+        ForeignKey("candidate_packages.id", ondelete="CASCADE"), nullable=False
+    )
+    template_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    template_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class VisualReview(TimestampMixin, Base):
+    __tablename__ = "visual_reviews"
+
+    review_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_review_templates.review_id", ondelete="CASCADE"), primary_key=True
+    )
+    completed_document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    completed_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class VisualReviewEntry(TimestampMixin, Base):
+    __tablename__ = "visual_review_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "entry_type IN ('candidate_review', 'blocked_beat_guidance')", name="entry_type"
+        ),
+        CheckConstraint("alignment_score IS NULL OR alignment_score BETWEEN 0 AND 100", name="score_range"),
+        CheckConstraint("decision IS NULL OR decision IN ('accept', 'replace')", name="decision"),
+        CheckConstraint("action IS NULL OR action = 'revise_search'", name="action"),
+        UniqueConstraint("review_id", "beat_id", name="uq_visual_review_entries_review_beat"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    review_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_reviews.review_id", ondelete="CASCADE"), nullable=False
+    )
+    beat_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_beats.id", ondelete="CASCADE"), nullable=False
+    )
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("beat_candidates.id", ondelete="RESTRICT")
+    )
+    alignment_score: Mapped[int | None] = mapped_column(Integer)
+    decision: Mapped[str | None] = mapped_column(String(16))
+    action: Mapped[str | None] = mapped_column(String(32))
+    mismatch_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    replacement_guidance_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    catalog_annotations_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class BeatAssetRejection(TimestampMixin, Base):
+    __tablename__ = "beat_asset_rejections"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "beat_id", "candidate_id", name="uq_beat_asset_rejections_candidate"),
+        Index("ix_beat_asset_rejections_beat_asset", "workflow_id", "beat_id", "asset_id"),
+        Index("ix_beat_asset_rejections_beat_sha", "workflow_id", "beat_id", "asset_sha256"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    beat_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_beats.id", ondelete="CASCADE"), nullable=False
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("beat_candidates.id", ondelete="RESTRICT"), nullable=False
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), nullable=False
+    )
+    asset_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_reviews.review_id", ondelete="RESTRICT"), nullable=False
+    )
+    rejected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class BeatSelection(TimestampMixin, Base):
+    __tablename__ = "beat_selections"
+    __table_args__ = (
+        CheckConstraint("alignment_score BETWEEN 90 AND 100", name="score_acceptance"),
+        CheckConstraint("status IN ('locked', 'blocked_missing')", name="status"),
+        UniqueConstraint("workflow_id", "beat_id", name="uq_beat_selections_workflow_beat"),
+        Index("ix_beat_selections_workflow_asset", "workflow_id", "asset_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    beat_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_beats.id", ondelete="CASCADE"), nullable=False
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("beat_candidates.id", ondelete="RESTRICT"), nullable=False
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), nullable=False
+    )
+    asset_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    review_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_reviews.review_id", ondelete="RESTRICT"), nullable=False
+    )
+    alignment_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    lock_compatibility_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="locked", server_default="locked")
+    blocked_reason: Mapped[str | None] = mapped_column(String(64))
+    locked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class AssetReviewAnnotation(TimestampMixin, Base):
+    __tablename__ = "asset_review_annotations"
+    __table_args__ = (
+        CheckConstraint("source_type = 'chatgpt_visual_review'", name="source_type"),
+        UniqueConstraint("asset_id", "review_id", name="uq_asset_review_annotations_asset_review"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="CASCADE"), nullable=False
+    )
+    review_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_reviews.review_id", ondelete="CASCADE"), nullable=False
+    )
+    source_type: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="chatgpt_visual_review", server_default="chatgpt_visual_review"
+    )
+    annotations_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)

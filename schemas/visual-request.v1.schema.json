@@ -1,0 +1,496 @@
+{
+  "$defs": {
+    "DesiredVisual": {
+      "additionalProperties": false,
+      "properties": {
+        "composition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Composition"
+        },
+        "historical_era": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Historical Era"
+        },
+        "mood": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mood"
+        },
+        "setting": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Setting"
+        },
+        "subjects": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Subjects",
+          "type": "array"
+        },
+        "summary": {
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "DesiredVisual",
+      "type": "object"
+    },
+    "SearchDirective": {
+      "additionalProperties": false,
+      "properties": {
+        "excluded_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Excluded Terms",
+          "type": "array"
+        },
+        "filters": {
+          "$ref": "#/$defs/SearchFilters"
+        },
+        "media_type": {
+          "enum": [
+            "image",
+            "video",
+            "either"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "query": {
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "required_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "query",
+        "media_type"
+      ],
+      "title": "SearchDirective",
+      "type": "object"
+    },
+    "SearchFilters": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum Duration Ms"
+        },
+        "minimum_duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Duration Ms"
+        },
+        "minimum_height": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Height"
+        },
+        "minimum_width": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Width"
+        },
+        "orientation": {
+          "anyOf": [
+            {
+              "enum": [
+                "landscape",
+                "portrait",
+                "square"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orientation"
+        }
+      },
+      "title": "SearchFilters",
+      "type": "object"
+    },
+    "StoryRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "presentation_profile": {
+          "const": "calm_late_night_second_monitor_v1",
+          "title": "Presentation Profile",
+          "type": "string"
+        },
+        "story_id": {
+          "title": "Story Id",
+          "type": "string"
+        },
+        "target_duration_ms": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Duration Ms"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "story_id",
+        "title",
+        "presentation_profile"
+      ],
+      "title": "StoryRequest",
+      "type": "object"
+    },
+    "TechnicalConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "minimum_height": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Height"
+        },
+        "minimum_width": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Width"
+        },
+        "orientation": {
+          "default": "any",
+          "enum": [
+            "any",
+            "landscape",
+            "portrait",
+            "square"
+          ],
+          "title": "Orientation",
+          "type": "string"
+        },
+        "video_duration_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VideoDuration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TechnicalConstraints",
+      "type": "object"
+    },
+    "Timing": {
+      "additionalProperties": false,
+      "properties": {
+        "end_ms": {
+          "exclusiveMinimum": 0,
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "precision": {
+          "enum": [
+            "exact",
+            "estimated"
+          ],
+          "title": "Precision",
+          "type": "string"
+        },
+        "start_ms": {
+          "minimum": 0,
+          "title": "Start Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms",
+        "precision"
+      ],
+      "title": "Timing",
+      "type": "object"
+    },
+    "VideoDuration": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        }
+      },
+      "title": "VideoDuration",
+      "type": "object"
+    },
+    "VisualBeat": {
+      "additionalProperties": false,
+      "properties": {
+        "avoid": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Avoid",
+          "type": "array"
+        },
+        "beat_id": {
+          "title": "Beat Id",
+          "type": "string"
+        },
+        "desired_visual": {
+          "$ref": "#/$defs/DesiredVisual"
+        },
+        "media_preference": {
+          "enum": [
+            "image",
+            "video",
+            "either"
+          ],
+          "title": "Media Preference",
+          "type": "string"
+        },
+        "must_have": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Must Have",
+          "type": "array"
+        },
+        "narration_context": {
+          "minLength": 1,
+          "title": "Narration Context",
+          "type": "string"
+        },
+        "preferred": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Preferred",
+          "type": "array"
+        },
+        "prior_usage_policy": {
+          "default": "prefer_unused",
+          "enum": [
+            "prefer_unused",
+            "allow_prior_usage",
+            "forbid_prior_usage"
+          ],
+          "title": "Prior Usage Policy",
+          "type": "string"
+        },
+        "repeat_within_story": {
+          "default": false,
+          "title": "Repeat Within Story",
+          "type": "boolean"
+        },
+        "search_concepts": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Search Concepts",
+          "type": "array"
+        },
+        "search_directives": {
+          "items": {
+            "$ref": "#/$defs/SearchDirective"
+          },
+          "minItems": 1,
+          "title": "Search Directives",
+          "type": "array"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "technical_constraints": {
+          "$ref": "#/$defs/TechnicalConstraints"
+        },
+        "timing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "beat_id",
+        "sequence",
+        "timing",
+        "narration_context",
+        "desired_visual",
+        "media_preference",
+        "search_concepts",
+        "search_directives"
+      ],
+      "title": "VisualBeat",
+      "type": "object"
+    }
+  },
+  "$id": "https://yt-visuals.local/schemas/visual-request.v1.schema.json",
+  "additionalProperties": false,
+  "properties": {
+    "beats": {
+      "items": {
+        "$ref": "#/$defs/VisualBeat"
+      },
+      "minItems": 1,
+      "title": "Beats",
+      "type": "array"
+    },
+    "contract_version": {
+      "const": 1,
+      "title": "Contract Version",
+      "type": "integer"
+    },
+    "document_type": {
+      "const": "visual_request",
+      "title": "Document Type",
+      "type": "string"
+    },
+    "story": {
+      "$ref": "#/$defs/StoryRequest"
+    }
+  },
+  "required": [
+    "document_type",
+    "contract_version",
+    "story",
+    "beats"
+  ],
+  "title": "VisualRequest",
+  "type": "object"
+}

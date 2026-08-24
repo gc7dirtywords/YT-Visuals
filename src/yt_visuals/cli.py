@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Callable
+from pathlib import Path
 
 from pydantic import ValidationError
 from sqlalchemy import Engine
@@ -17,6 +18,7 @@ from .providers.base import MediaProvider, MediaSearchResult, SearchPage
 from .providers.errors import ProviderError
 from .providers.registry import create_provider, list_providers
 from .services import MediaCatalogService, MediaServiceError, SearchMediaRequest
+from .workflow import VisualWorkflowError, VisualWorkflowService
 
 
 ProviderFactory = Callable[[str, Settings], MediaProvider]
@@ -78,6 +80,37 @@ def build_parser() -> argparse.ArgumentParser:
     library_search.add_argument("--max-duration", type=float, help="Maximum video duration in seconds")
     library_search.add_argument("--limit", type=int, default=100)
     library_search.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    visual = subparsers.add_parser("visual", help="Manage deterministic story visual review workflows")
+    visual_subparsers = visual.add_subparsers(dest="visual_command", required=True)
+    visual_request = visual_subparsers.add_parser("request", help="Validate Visual Request files")
+    visual_request_subparsers = visual_request.add_subparsers(dest="visual_request_command", required=True)
+    visual_validate = visual_request_subparsers.add_parser("validate", help="Validate a Visual Request v1 JSON file")
+    visual_validate.add_argument("path")
+    visual_validate.add_argument("--json", action="store_true", help="Print normalized machine-readable JSON")
+
+    visual_workflow = visual_subparsers.add_parser("workflow", help="Run the local story review loop")
+    visual_workflow_subparsers = visual_workflow.add_subparsers(dest="visual_workflow_command", required=True)
+    workflow_start = visual_workflow_subparsers.add_parser("start", help="Start a workflow from a Visual Request")
+    workflow_start.add_argument("path")
+    workflow_start.add_argument("--json", action="store_true")
+    workflow_revise = visual_workflow_subparsers.add_parser("revise", help="Import an explicit workflow revision")
+    workflow_revise.add_argument("workflow_id")
+    workflow_revise.add_argument("path")
+    workflow_revise.add_argument("--json", action="store_true")
+    workflow_source = visual_workflow_subparsers.add_parser("source", help="Generate the next local candidate package")
+    workflow_source.add_argument("workflow_id")
+    workflow_source.add_argument("--json", action="store_true")
+    workflow_status = visual_workflow_subparsers.add_parser("status", help="Show workflow state")
+    workflow_status.add_argument("workflow_id")
+    workflow_status.add_argument("--json", action="store_true")
+    workflow_review = visual_workflow_subparsers.add_parser("review", help="Import a completed Visual Review")
+    workflow_review.add_argument("workflow_id")
+    workflow_review.add_argument("path")
+    workflow_review.add_argument("--json", action="store_true")
+    workflow_artifacts = visual_workflow_subparsers.add_parser("artifacts", help="List append-only workflow artifacts")
+    workflow_artifacts.add_argument("workflow_id")
+    workflow_artifacts.add_argument("--json", action="store_true")
     return parser
 
 
@@ -125,6 +158,8 @@ def cli(
 
         if args.command == "library":
             return _library(args, settings)
+        if args.command == "visual":
+            return _visual(args, settings)
     except MediaServiceError as exc:
         print(f"Error [{exc.code}]: {exc}")
         return 1
@@ -138,6 +173,45 @@ def cli(
         return 1
 
     return 2
+
+
+def _visual(args: argparse.Namespace, settings: Settings) -> int:
+    if args.visual_command == "request" and args.visual_request_command == "validate":
+        request = VisualWorkflowService.validate_request_file(Path(args.path))
+        if args.json:
+            print(request.model_dump_json(indent=2))
+        else:
+            print(
+                f"Valid Visual Request v1: {request.story.story_id}; "
+                f"{len(request.beats)} beat(s)"
+            )
+        return 0
+
+    engine = initialize_database(settings)
+    service = VisualWorkflowService(settings, engine)
+    try:
+        command = args.visual_workflow_command
+        if command == "start":
+            result = service.start_workflow(Path(args.path)).to_dict()
+        elif command == "revise":
+            result = service.revise_workflow(args.workflow_id, Path(args.path)).to_dict()
+        elif command == "source":
+            result = service.generate_package(args.workflow_id).to_dict()
+        elif command == "status":
+            result = service.get_status(args.workflow_id)
+        elif command == "review":
+            result = service.import_review(args.workflow_id, Path(args.path)).to_dict()
+        elif command == "artifacts":
+            result = {"workflow_id": args.workflow_id, "packages": service.get_artifacts(args.workflow_id)}
+        else:
+            return 2
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    finally:
+        engine.dispose()
 
 
 def _library(args: argparse.Namespace, settings: Settings) -> int:
