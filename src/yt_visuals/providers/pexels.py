@@ -250,7 +250,11 @@ class PexelsProvider:
             raw_metadata=dict(item),
             commercial_use_allowed=True,
             modifications_allowed=True,
-            license_notes="Attribution is optional but appreciated; review the Pexels License for restrictions.",
+            license_notes=(
+                "Attribution is optional but appreciated; review the Pexels License. "
+                "This mapping does not clear people, property, trademark, logo, sensitive-context, "
+                "or other third-party rights."
+            ),
         )
 
     def _normalize_video(self, item: Any) -> MediaSearchResult:
@@ -295,7 +299,11 @@ class PexelsProvider:
             raw_metadata=dict(item),
             commercial_use_allowed=True,
             modifications_allowed=True,
-            license_notes="Attribution is optional but appreciated; review the Pexels License for restrictions.",
+            license_notes=(
+                "Attribution is optional but appreciated; review the Pexels License. "
+                "This mapping does not clear people, property, trademark, logo, sensitive-context, "
+                "or other third-party rights."
+            ),
         )
 
     @staticmethod

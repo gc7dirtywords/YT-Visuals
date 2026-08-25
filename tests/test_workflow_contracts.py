@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from yt_visuals.workflow.contracts import (
     VisualRequest,
     VisualReviewDocument,
+    VisualReviewDocumentV2,
+    validate_visual_review_document,
     compatibility_fingerprint,
 )
 
@@ -175,3 +177,25 @@ def test_alignment_threshold_and_replacement_rules() -> None:
     missing_guidance["review_entries"][0]["editorial_review"]["replacement_guidance"] = None
     with pytest.raises(ValidationError):
         VisualReviewDocument.model_validate(missing_guidance)
+
+
+def test_v2_adds_only_external_blocked_reasons_and_v1_still_imports() -> None:
+    assert isinstance(validate_visual_review_document(completed_review(95, "accept")), VisualReviewDocument)
+    document = completed_review(95, "accept")
+    document["contract_version"] = 2
+    assert isinstance(validate_visual_review_document(document), VisualReviewDocumentV2)
+    blocked = deepcopy(document)
+    blocked["review_entries"] = [{
+        "entry_type": "blocked_beat_guidance", "beat_id": "beat-001", "sequence": 1,
+        "blocked_reason": {
+            "code": "no_external_provider_matches",
+            "explanation": "No Pexels results were returned.",
+        },
+        "editorial_guidance": {
+            "action": "revise_search", "replacement_guidance": replacement_guidance(),
+        },
+    }]
+    assert isinstance(validate_visual_review_document(blocked), VisualReviewDocumentV2)
+    blocked["contract_version"] = 1
+    with pytest.raises(ValidationError):
+        VisualReviewDocument.model_validate(blocked)

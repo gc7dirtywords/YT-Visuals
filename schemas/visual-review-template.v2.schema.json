@@ -1,0 +1,310 @@
+{
+  "$defs": {
+    "BlankBlockedGuidance": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "title": "Action",
+          "type": "null"
+        },
+        "replacement_guidance": {
+          "title": "Replacement Guidance",
+          "type": "null"
+        }
+      },
+      "required": [
+        "action",
+        "replacement_guidance"
+      ],
+      "title": "BlankBlockedGuidance",
+      "type": "object"
+    },
+    "BlankCandidateEditorialReview": {
+      "additionalProperties": false,
+      "properties": {
+        "alignment_score": {
+          "title": "Alignment Score",
+          "type": "null"
+        },
+        "catalog_annotations": {
+          "title": "Catalog Annotations",
+          "type": "null"
+        },
+        "decision": {
+          "title": "Decision",
+          "type": "null"
+        },
+        "mismatch_explanation": {
+          "title": "Mismatch Explanation",
+          "type": "null"
+        },
+        "mismatch_reasons": {
+          "default": [],
+          "maxItems": 0,
+          "minItems": 0,
+          "title": "Mismatch Reasons",
+          "type": "array"
+        },
+        "replacement_guidance": {
+          "title": "Replacement Guidance",
+          "type": "null"
+        }
+      },
+      "required": [
+        "alignment_score",
+        "decision",
+        "mismatch_explanation",
+        "replacement_guidance",
+        "catalog_annotations"
+      ],
+      "title": "BlankCandidateEditorialReview",
+      "type": "object"
+    },
+    "BlockedGuidanceTemplateEntryV2": {
+      "additionalProperties": false,
+      "properties": {
+        "beat_id": {
+          "title": "Beat Id",
+          "type": "string"
+        },
+        "blocked_reason": {
+          "$ref": "#/$defs/BlockedReasonV2"
+        },
+        "editorial_guidance": {
+          "$ref": "#/$defs/BlankBlockedGuidance"
+        },
+        "entry_type": {
+          "const": "blocked_beat_guidance",
+          "title": "Entry Type",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entry_type",
+        "beat_id",
+        "sequence",
+        "blocked_reason",
+        "editorial_guidance"
+      ],
+      "title": "BlockedGuidanceTemplateEntryV2",
+      "type": "object"
+    },
+    "BlockedReasonV2": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "no_local_matches",
+            "all_matches_excluded",
+            "no_technically_eligible_matches",
+            "preview_generation_failed",
+            "no_external_provider_matches",
+            "all_external_provider_matches_excluded",
+            "no_external_provider_technically_eligible_matches"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "explanation": {
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "explanation"
+      ],
+      "title": "BlockedReasonV2",
+      "type": "object"
+    },
+    "CandidateReference": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "exclusiveMinimum": 0,
+          "title": "Asset Id",
+          "type": "integer"
+        },
+        "asset_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Asset Sha256",
+          "type": "string"
+        },
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "asset_id",
+        "asset_sha256"
+      ],
+      "title": "CandidateReference",
+      "type": "object"
+    },
+    "CandidateReviewTemplateEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "beat_id": {
+          "title": "Beat Id",
+          "type": "string"
+        },
+        "candidate": {
+          "$ref": "#/$defs/CandidateReference"
+        },
+        "editorial_review": {
+          "$ref": "#/$defs/BlankCandidateEditorialReview"
+        },
+        "entry_type": {
+          "const": "candidate_review",
+          "title": "Entry Type",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entry_type",
+        "beat_id",
+        "sequence",
+        "candidate",
+        "editorial_review"
+      ],
+      "title": "CandidateReviewTemplateEntry",
+      "type": "object"
+    },
+    "ReviewBookkeeping": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Report Sha256",
+          "type": "string"
+        },
+        "iteration": {
+          "minimum": 1,
+          "title": "Iteration",
+          "type": "integer"
+        },
+        "package_id": {
+          "title": "Package Id",
+          "type": "string"
+        },
+        "request_document_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Request Document Sha256",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "request_revision": {
+          "minimum": 1,
+          "title": "Request Revision",
+          "type": "integer"
+        },
+        "review_id": {
+          "title": "Review Id",
+          "type": "string"
+        },
+        "storyboard_pdf_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Storyboard Pdf Sha256",
+          "type": "string"
+        },
+        "workflow_id": {
+          "title": "Workflow Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "request_id",
+        "request_revision",
+        "request_document_sha256",
+        "package_id",
+        "candidate_report_sha256",
+        "storyboard_pdf_sha256",
+        "review_id",
+        "iteration"
+      ],
+      "title": "ReviewBookkeeping",
+      "type": "object"
+    },
+    "ReviewStory": {
+      "additionalProperties": false,
+      "properties": {
+        "story_id": {
+          "title": "Story Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "story_id"
+      ],
+      "title": "ReviewStory",
+      "type": "object"
+    }
+  },
+  "$id": "https://yt-visuals.local/schemas/visual-review-template.v2.schema.json",
+  "additionalProperties": false,
+  "properties": {
+    "bookkeeping": {
+      "$ref": "#/$defs/ReviewBookkeeping"
+    },
+    "contract_version": {
+      "const": 2,
+      "title": "Contract Version",
+      "type": "integer"
+    },
+    "document_type": {
+      "const": "visual_review",
+      "title": "Document Type",
+      "type": "string"
+    },
+    "review_entries": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "blocked_beat_guidance": "#/$defs/BlockedGuidanceTemplateEntryV2",
+            "candidate_review": "#/$defs/CandidateReviewTemplateEntry"
+          },
+          "propertyName": "entry_type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/CandidateReviewTemplateEntry"
+          },
+          {
+            "$ref": "#/$defs/BlockedGuidanceTemplateEntryV2"
+          }
+        ]
+      },
+      "title": "Review Entries",
+      "type": "array"
+    },
+    "story": {
+      "$ref": "#/$defs/ReviewStory"
+    }
+  },
+  "required": [
+    "document_type",
+    "contract_version",
+    "bookkeeping",
+    "story",
+    "review_entries"
+  ],
+  "title": "VisualReviewTemplateV2",
+  "type": "object"
+}

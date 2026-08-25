@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 from sqlalchemy import Engine, func, select
@@ -19,6 +19,8 @@ from ..models import (
     BeatSelection,
     CandidatePackage,
     MediaAsset,
+    MediaSource,
+    MediaProvider,
     VisualBeat as VisualBeatRow,
     VisualBeatRevision,
     VisualRequestRevision,
@@ -31,19 +33,26 @@ from ..services import MediaCatalogService, SearchMediaRequest
 from ..services.schemas import AssetDetailResult, SearchCandidateResult
 from .artifacts import extract_video_frames, file_sha256, render_storyboard, write_json
 from .contracts import (
-    CandidateReport,
+    CandidateReportV2,
     CompletedBlockedGuidanceEntry,
+    CompletedBlockedGuidanceEntryV2,
     CompletedCandidateReviewEntry,
     ReplacementGuidance,
     SearchDirective,
     VisualBeat,
     VisualRequest,
     VisualReviewDocument,
-    VisualReviewTemplate,
+    VisualReviewDocumentV2,
+    VisualReviewTemplateV2,
     canonical_request_bytes,
     compatibility_fingerprint,
     sha256_bytes,
+    validate_visual_review_document,
 )
+from .provider_fallback import ProviderFallbackCoordinator
+from ..acquisition import AcquisitionService
+from ..providers.base import MediaProvider
+from ..providers.registry import create_provider
 
 
 class VisualWorkflowError(RuntimeError):
@@ -115,10 +124,19 @@ class ReviewImportResult:
 
 
 class VisualWorkflowService:
-    def __init__(self, settings: Settings, engine: Engine) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        engine: Engine,
+        *,
+        provider_factory: Callable[[str, Settings], MediaProvider] = create_provider,
+        acquisition_factory: Callable[[Settings, Engine], AcquisitionService] = AcquisitionService,
+    ) -> None:
         self.settings = settings
         self.engine = engine
         self.catalog = MediaCatalogService(engine)
+        self.provider_factory = provider_factory
+        self.acquisition_factory = acquisition_factory
 
     @staticmethod
     def validate_request_data(value: Any) -> VisualRequest:
@@ -325,7 +343,7 @@ class VisualWorkflowService:
                 report_beats: list[dict[str, Any]] = []
                 for beat in request.beats:
                     row = beat_rows[beat.beat_id]
-                    effective = self._effective_beat(session, row.id, beat)
+                    effective, external_allowed = self._effective_beat(session, row.id, beat)
                     snapshot = _request_snapshot(effective)
                     selection = session.scalar(
                         select(BeatSelection).where(
@@ -348,6 +366,7 @@ class VisualWorkflowService:
                         artifact_dir,
                         reserved_ids,
                         reserved_hashes,
+                        external_allowed,
                     )
                     if chosen is None:
                         row.state = "blocked_no_candidate"
@@ -387,10 +406,10 @@ class VisualWorkflowService:
                 "blocked_no_candidate": sum(item["state"] == "blocked_no_candidate" for item in report_beats),
                 "blocked_missing": sum(item["state"] == "blocked_missing" for item in report_beats),
             }
-            report_model = CandidateReport.model_validate(
+            report_model = CandidateReportV2.model_validate(
                 {
                     "document_type": "candidate_report",
-                    "contract_version": 1,
+                    "contract_version": 2,
                     "workflow_id": workflow_id,
                     "request_id": request_id_value,
                     "request_revision": request_revision_value,
@@ -452,6 +471,28 @@ class VisualWorkflowService:
                 failed = session.get(CandidatePackage, package_id)
                 if failed is not None:
                     failed.status = "generation_failed"
+                    candidates = list(session.scalars(
+                        select(BeatCandidate).where(BeatCandidate.package_id == package_id)
+                    ))
+                    affected = {item.beat_id for item in candidates}
+                    for candidate in candidates:
+                        session.delete(candidate)
+                    rows = list(session.scalars(
+                        select(VisualBeatRow).where(
+                            VisualBeatRow.workflow_id == workflow_id,
+                            VisualBeatRow.state.in_(("sourcing", "review_required")),
+                        )
+                    ))
+                    for row in rows:
+                        if row.id not in affected and row.state != "sourcing":
+                            continue
+                        prior_feedback = session.scalar(
+                            select(VisualReviewEntry.id).where(VisualReviewEntry.beat_id == row.id)
+                        )
+                        rejection = session.scalar(
+                            select(BeatAssetRejection.id).where(BeatAssetRejection.beat_id == row.id)
+                        )
+                        row.state = "rejected" if prior_feedback or rejection else "pending"
                     session.commit()
             raise
 
@@ -459,8 +500,8 @@ class VisualWorkflowService:
         try:
             raw_bytes = path.read_bytes()
             raw_value = json.loads(raw_bytes.decode("utf-8"))
-            review = VisualReviewDocument.model_validate(raw_value)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+            review = validate_visual_review_document(raw_value)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise VisualWorkflowError(f"Visual Review validation failed: {exc}") from exc
         digest = sha256_bytes(raw_bytes)
         review_id = review.bookkeeping.review_id
@@ -576,7 +617,7 @@ class VisualWorkflowService:
                                 review_id=review_id,
                             )
                         )
-                elif isinstance(entry, CompletedBlockedGuidanceEntry):
+                elif isinstance(entry, (CompletedBlockedGuidanceEntry, CompletedBlockedGuidanceEntryV2)):
                     guidance_count += 1
                     beat.state = "rejected"
                     session.add(
@@ -679,6 +720,7 @@ class VisualWorkflowService:
         artifact_dir: Path,
         reserved_ids: set[int],
         reserved_hashes: set[str],
+        external_allowed: bool,
     ) -> tuple[dict[str, Any] | None, dict[str, str]]:
         rejected = list(
             session.scalars(
@@ -770,24 +812,84 @@ class VisualWorkflowService:
             session.flush()
             return report_candidate, {}
         if preview_failed and saw_eligible:
-            return None, {
+            return self._external_or_block(session, workflow_id, beat_row, beat, package_id,
+                artifact_dir, reserved_ids, reserved_hashes, rejected_ids, rejected_hashes,
+                external_allowed, {
                 "code": "preview_generation_failed",
                 "explanation": "Eligible local media existed but no reliable review preview could be generated.",
-            }
+            })
         if saw_excluded and saw_catalog:
-            return None, {
+            return self._external_or_block(session, workflow_id, beat_row, beat, package_id,
+                artifact_dir, reserved_ids, reserved_hashes, rejected_ids, rejected_hashes,
+                external_allowed, {
                 "code": "all_matches_excluded",
                 "explanation": "Local matches were excluded by rejection history, reservations, or explicit filters.",
-            }
+            })
         if saw_catalog:
-            return None, {
+            return self._external_or_block(session, workflow_id, beat_row, beat, package_id,
+                artifact_dir, reserved_ids, reserved_hashes, rejected_ids, rejected_hashes,
+                external_allowed, {
                 "code": "no_technically_eligible_matches",
                 "explanation": "Local matches existed, but none met the structured technical and licensing requirements.",
-            }
-        return None, {
+            })
+        return self._external_or_block(session, workflow_id, beat_row, beat, package_id,
+            artifact_dir, reserved_ids, reserved_hashes, rejected_ids, rejected_hashes,
+            external_allowed, {
             "code": "no_local_matches",
             "explanation": "The explicit local search directives returned no catalog matches.",
-        }
+        })
+
+    def _external_or_block(
+        self, session: Session, workflow_id: str, beat_row: VisualBeatRow, beat: VisualBeat,
+        package_id: str, artifact_dir: Path, reserved_ids: set[int], reserved_hashes: set[str],
+        rejected_ids: set[int], rejected_hashes: set[str], external_allowed: bool,
+        local_blocked: dict[str, str],
+    ) -> tuple[dict[str, Any] | None, dict[str, str]]:
+        if not external_allowed:
+            return None, local_blocked
+        provider_ids = set(
+            session.scalars(
+                select(MediaSource.provider_asset_id).join(MediaProvider).where(
+                    MediaSource.asset_id.in_(rejected_ids),
+                    func.lower(MediaProvider.name) == "pexels",
+                    MediaSource.provider_asset_id.is_not(None),
+                )
+            )
+        ) if rejected_ids else set()
+        # Provider acquisition uses its own short transactions and durable journal.
+        session.commit()
+        outcome = ProviderFallbackCoordinator(
+            self.settings, self.engine,
+            provider_factory=self.provider_factory,
+            acquisition_factory=self.acquisition_factory,
+        ).source(
+            workflow_id=workflow_id, package_id=package_id, beat_row_id=beat_row.id, beat=beat,
+            rejected_ids=rejected_ids, rejected_hashes=rejected_hashes,
+            rejected_provider_ids={value for value in provider_ids if value},
+            reserved_ids=reserved_ids, reserved_hashes=reserved_hashes,
+        )
+        if outcome.candidate is None:
+            assert outcome.blocked_reason is not None
+            return None, outcome.blocked_reason
+        external = outcome.candidate
+        candidate = _search_candidate_from_detail(external.detail, rank=external.provider_rank)
+        preview = self._preview_for_candidate(
+            candidate, artifact_dir / "previews" / beat.beat_id / str(candidate.asset_id)
+        )
+        candidate_id = str(uuid.uuid4())
+        report = _report_candidate(
+            candidate_id, candidate, external.detail, external.directive, 0, preview,
+            catalog_status=("newly_downloaded" if external.outcome.created_asset else "previously_downloaded"),
+            retrieval_stage="local", retrieval_query=external.executable_query,
+            retrieval_rank=external.provider_rank,
+        )
+        session.add(BeatCandidate(
+            id=candidate_id, package_id=package_id, beat_id=beat_row.id,
+            asset_id=candidate.asset_id, asset_sha256=candidate.sha256,
+            status="proposed", retrieval_json=report["retrieval"], preview_json=preview,
+        ))
+        session.flush()
+        return report, {}
 
     def _preview_for_candidate(
         self, candidate: SearchCandidateResult, preview_dir: Path
@@ -810,7 +912,7 @@ class VisualWorkflowService:
 
     def _effective_beat(
         self, session: Session, beat_row_id: str, original: VisualBeat
-    ) -> VisualBeat:
+    ) -> tuple[VisualBeat, bool]:
         latest = session.scalar(
             select(VisualReviewEntry)
             .where(
@@ -820,7 +922,7 @@ class VisualWorkflowService:
             .order_by(VisualReviewEntry.id.desc())
         )
         if latest is None or latest.replacement_guidance_json is None:
-            return original
+            return original, False
         guidance = ReplacementGuidance.model_validate(latest.replacement_guidance_json)
         update: dict[str, Any] = {
             "search_directives": guidance.revised_search_directives,
@@ -830,7 +932,7 @@ class VisualWorkflowService:
         }
         if guidance.media_preference_change is not None:
             update["media_preference"] = guidance.media_preference_change
-        return original.model_copy(update=update)
+        return original.model_copy(update=update), guidance.external_sourcing_allowed
 
     @staticmethod
     def _locked_reservations(
@@ -910,11 +1012,11 @@ class VisualWorkflowService:
 
     @staticmethod
     def _review_template(
-        report: CandidateReport,
+        report: CandidateReportV2,
         *,
         candidate_report_sha256: str,
         storyboard_pdf_sha256: str,
-    ) -> VisualReviewTemplate:
+    ) -> VisualReviewTemplateV2:
         entries: list[dict[str, Any]] = []
         for beat in report.beats:
             if beat.state == "review_required":
@@ -956,10 +1058,10 @@ class VisualWorkflowService:
                         },
                     }
                 )
-        return VisualReviewTemplate.model_validate(
+        return VisualReviewTemplateV2.model_validate(
             {
                 "document_type": "visual_review",
-                "contract_version": 1,
+                "contract_version": 2,
                 "bookkeeping": {
                     "workflow_id": report.workflow_id,
                     "request_id": report.request_id,
@@ -978,7 +1080,7 @@ class VisualWorkflowService:
 
     def _validate_review_integrity(
         self,
-        review: VisualReviewDocument,
+        review: VisualReviewDocument | VisualReviewDocumentV2,
         template_json: dict[str, Any],
         package: CandidatePackage,
     ) -> None:
@@ -1131,6 +1233,11 @@ def _report_candidate(
     directive: SearchDirective,
     retrieval_score: int,
     preview: dict[str, Any],
+    *,
+    catalog_status: str | None = None,
+    retrieval_stage: str = "local",
+    retrieval_query: str | None = None,
+    retrieval_rank: int | None = None,
 ) -> dict[str, Any]:
     location = next(
         (item for item in detail.locations if item.relative_path == detail.current_location),
@@ -1143,7 +1250,7 @@ def _report_candidate(
         "asset_id": candidate.asset_id,
         "asset_sha256": candidate.sha256,
         "media_type": candidate.media_type,
-        "catalog_status": (
+        "catalog_status": catalog_status or (
             "previously_downloaded"
             if location and location.provenance_type == "provider_download"
             else "existing_local"
@@ -1182,14 +1289,44 @@ def _report_candidate(
             ],
         },
         "retrieval": {
-            "stage": "local",
-            "query": directive.query,
-            "rank": candidate.rank,
+            "stage": retrieval_stage,
+            "query": retrieval_query or directive.query,
+            "rank": retrieval_rank or candidate.rank,
             "retrieval_score": retrieval_score,
             "score_reasons": list(candidate.score_reasons),
         },
         "storyboard_visuals": preview,
     }
+
+
+def _search_candidate_from_detail(
+    detail: AssetDetailResult, *, rank: int
+) -> SearchCandidateResult:
+    return SearchCandidateResult(
+        rank=rank,
+        score=0,
+        score_reasons=(),
+        asset_id=detail.asset_id,
+        relative_path=detail.relative_path,
+        current_location=detail.current_location,
+        media_type=detail.media_type,
+        mime_type=detail.mime_type,
+        extension=detail.extension,
+        width=detail.width,
+        height=detail.height,
+        orientation=detail.orientation,
+        duration_ms=detail.duration_ms,
+        file_size_bytes=detail.file_size_bytes,
+        sha256=detail.sha256,
+        available=detail.available,
+        locations=tuple(item.relative_path for item in detail.locations),
+        providers=tuple(item.provider for item in detail.sources if item.provider),
+        creators=tuple(item.creator_name for item in detail.sources if item.creator_name),
+        tags=detail.tags,
+        usage_count=detail.usage_count,
+        recent_usage_count=len(detail.recent_usage),
+        last_used_at=detail.last_used_at,
+    )
 
 
 def _report_candidate_from_lock(

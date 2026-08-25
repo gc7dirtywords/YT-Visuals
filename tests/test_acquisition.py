@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -11,7 +12,7 @@ from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from yt_visuals.acquisition import AcquisitionService, ProbeResult, safe_filename
+from yt_visuals.acquisition import AcquisitionContext, AcquisitionService, ProbeResult, safe_filename
 from yt_visuals.config import Settings
 from yt_visuals.database import initialize_database
 from yt_visuals.library import LibraryScanner
@@ -37,8 +38,8 @@ def photo_result(asset_id: str = "42") -> MediaSearchResult:
         creator_name="Alex Example",
         creator_url="https://www.pexels.com/@alex",
         source_url=f"https://www.pexels.com/photo/{asset_id}/",
-        download_url=f"https://images.pexels.test/{asset_id}.jpeg",
-        preview_url=f"https://images.pexels.test/{asset_id}-preview.jpeg",
+        download_url=f"https://images.pexels.com/{asset_id}.jpeg",
+        preview_url=f"https://images.pexels.com/{asset_id}-preview.jpeg",
         width=1920,
         height=1080,
         duration_ms=None,
@@ -65,10 +66,18 @@ class CountingStream(httpx.SyncByteStream):
             yield chunk
 
 
+def jpeg_bytes(size: tuple[int, int] = (64, 36)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, "navy").save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
 def test_streamed_download_hash_safe_filename_and_catalog_insertion(
     catalog_settings: Settings,
 ) -> None:
-    chunks = [b"first-", b"second-", b"third"]
+    content = jpeg_bytes()
+    split = len(content) // 3
+    chunks = [content[:split], content[split : split * 2], content[split * 2 :]]
     stream = CountingStream(chunks)
     client = httpx.Client(
         transport=httpx.MockTransport(
@@ -105,7 +114,7 @@ def test_streamed_download_hash_safe_filename_and_catalog_insertion(
         assert asset is not None
         assert asset.relative_path == outcome.relative_path
         assert asset.mime_type == "image/jpeg"
-        assert (asset.width, asset.height) == (1920, 1080)
+        assert (asset.width, asset.height) == (64, 36)
         assert asset.sources[0].provider_asset_id == "photo:42"
         assert asset.sources[0].source_url == "https://www.pexels.com/photo/42/"
         assert asset.license is not None
@@ -118,7 +127,7 @@ def test_streamed_download_hash_safe_filename_and_catalog_insertion(
         assert history.provider_asset_id == "42"
         assert history.media_type == "image"
         assert history.source_url == "https://www.pexels.com/photo/42/"
-        assert history.download_url == "https://images.pexels.test/42.jpeg"
+        assert history.download_url == "https://images.pexels.com/42.jpeg"
         assert history.attempted_at is not None
         assert history.completed_at is not None
         assert history.completed_at >= history.attempted_at
@@ -152,7 +161,7 @@ def test_same_provider_asset_is_not_downloaded_twice(catalog_settings: Settings)
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal requests
         requests += 1
-        return httpx.Response(200, headers={"Content-Type": "image/jpeg"}, content=b"asset")
+        return httpx.Response(200, headers={"Content-Type": "image/jpeg"}, content=jpeg_bytes())
 
     engine = initialize_database(catalog_settings)
     service = AcquisitionService(
@@ -204,10 +213,11 @@ def test_duplicate_sha_reuses_asset_and_adds_source(catalog_settings: Settings) 
         http_client=httpx.Client(
             transport=httpx.MockTransport(
                 lambda request: httpx.Response(
-                    200, headers={"Content-Type": "image/jpeg"}, content=b"same bytes"
+                    200, headers={"Content-Type": "image/jpeg"}, content=jpeg_bytes()
                 )
             )
         ),
+        allowed_download_hosts={"images.pexels.com", "other.test"},
     )
     first = service.acquire(photo_result("42"))
     second_result = replace(
@@ -233,12 +243,13 @@ def test_duplicate_sha_reuses_asset_and_adds_source(catalog_settings: Settings) 
         history = list(session.scalars(select(MediaDownload).order_by(MediaDownload.id)))
         assert [item.status for item in history] == ["success", "duplicate"]
         assert history[1].media_asset_id == first.asset_id
-        assert history[1].downloaded_bytes == len(b"same bytes")
+        assert history[1].downloaded_bytes == len(jpeg_bytes())
         assert history[1].http_status_code == 200
         assert history[1].request_metadata == {
             "network_transfer": True,
             "reuse_reason": "sha256",
             "source_attached": True,
+            "restored_missing_asset": False,
         }
         asset = session.get(MediaAsset, first.asset_id)
         assert asset is not None
@@ -286,6 +297,7 @@ def test_failed_download_history_has_no_asset_relationship(catalog_settings: Set
         assert history.request_metadata == {
             "network_transfer": True,
             "failure_stage": "transfer",
+            "selection": {},
         }
         assert session.scalar(select(func.count()).select_from(MediaAsset)) == 0
     engine.dispose()
@@ -301,7 +313,7 @@ def test_video_ffprobe_metadata_overrides_provider_values(catalog_settings: Sett
         creator_name="Videographer",
         creator_url=None,
         source_url="https://www.pexels.com/video/99/",
-        download_url="https://videos.pexels.test/99.mp4",
+        download_url="https://videos.pexels.com/99.mp4",
         preview_url=None,
         width=640,
         height=360,
@@ -376,5 +388,171 @@ def test_local_asset_later_receives_provider_provenance_without_second_asset(
     assert [path.name for path in (catalog_settings.root / "Library/Images").iterdir()] == [
         "preexisting.jpg"
     ]
+    service.close()
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("url", "content_type", "content", "message"),
+    [
+        ("http://images.pexels.com/unsafe.jpg", "image/jpeg", b"x", "HTTPS"),
+        ("https://evil.example/unsafe.jpg", "image/jpeg", b"x", "allowlisted"),
+        ("https://images.pexels.com/wrong.jpg", "text/plain", b"x", "MIME"),
+        ("https://images.pexels.com/corrupt.jpg", "image/jpeg", b"not-an-image", "decoded"),
+    ],
+)
+def test_acquisition_rejects_unsafe_urls_mime_and_corrupt_images(
+    catalog_settings: Settings,
+    url: str,
+    content_type: str,
+    content: bytes,
+    message: str,
+) -> None:
+    engine = initialize_database(catalog_settings)
+    service = AcquisitionService(
+        catalog_settings,
+        engine,
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, headers={"Content-Type": content_type}, content=content)
+        )),
+    )
+    with pytest.raises(MediaDownloadError, match=message):
+        service.acquire(replace(photo_result("901"), download_url=url))
+    assert not list((catalog_settings.root / "Temp").rglob("download.part"))
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 0
+    service.close()
+    engine.dispose()
+
+
+def test_acquisition_enforces_header_and_streaming_limits(
+    catalog_settings: Settings, monkeypatch
+) -> None:
+    monkeypatch.setenv("YT_VISUALS_MAX_IMAGE_DOWNLOAD_BYTES", "100")
+    engine = initialize_database(catalog_settings)
+    responses = iter([
+        httpx.Response(200, headers={"Content-Type": "image/jpeg", "Content-Length": "101"}, content=b""),
+        httpx.Response(200, headers={"Content-Type": "image/jpeg"}, content=b"x" * 101),
+    ])
+    service = AcquisitionService(
+        catalog_settings,
+        engine,
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda request: next(responses))),
+    )
+    with pytest.raises(MediaDownloadError, match="100-byte limit"):
+        service.acquire(photo_result("902"))
+    with pytest.raises(MediaDownloadError, match="100-byte limit"):
+        service.acquire(photo_result("903"))
+    assert not list((catalog_settings.root / "Temp").rglob("download.part"))
+    service.close()
+    engine.dispose()
+
+
+def test_known_provider_source_with_missing_file_is_restored(
+    catalog_settings: Settings,
+) -> None:
+    content = jpeg_bytes((80, 45))
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, headers={"Content-Type": "image/jpeg"}, content=content)
+
+    engine = initialize_database(catalog_settings)
+    service = AcquisitionService(
+        catalog_settings, engine,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    first = service.acquire(photo_result("904"))
+    (catalog_settings.root / first.relative_path).unlink()
+    LibraryScanner(catalog_settings, engine).scan()
+    restored = service.acquire(photo_result("904"))
+    assert restored.asset_id == first.asset_id
+    assert restored.created_asset is False
+    assert (catalog_settings.root / restored.relative_path).is_file()
+    assert requests == 2
+    with Session(engine) as session:
+        history = session.scalar(select(MediaDownload).order_by(MediaDownload.id.desc()))
+        assert history is not None and history.status == "success"
+        assert history.request_metadata["restored_missing_asset"] is True
+    service.close()
+    engine.dispose()
+
+
+def test_recovery_catalogs_valid_final_file_from_started_journal(
+    catalog_settings: Settings,
+) -> None:
+    engine = initialize_database(catalog_settings)
+    content = jpeg_bytes((96, 54))
+    digest = hashlib.sha256(content).hexdigest()
+    destination = catalog_settings.root / "Library/Images/recovered.jpg"
+    destination.write_bytes(content)
+    result = photo_result("905")
+    context = AcquisitionContext(
+        workflow_id="workflow-test", package_id="package-test", beat_id="beat-test",
+        directive_index=0, provider_rank=1, executable_query="dark fireplace",
+        required_terms=("dark",), directive_media_type="image",
+    )
+    with Session(engine) as session:
+        history = MediaDownload(
+            provider="pexels", provider_asset_id="905", media_type="image",
+            source_url=result.source_url, download_url=result.download_url,
+            attempted_at=datetime.now(timezone.utc), status="started",
+            relative_path="Library/Images/recovered.jpg", sha256=digest,
+            downloaded_bytes=len(content), http_status_code=200,
+            content_type="image/jpeg", provider_metadata=result.raw_metadata,
+            request_metadata={
+                "network_transfer": True, "stage": "validated",
+                "selection": context.to_metadata(), "normalized_result": result.to_dict(),
+                "observed_media": {
+                    "mime_type": "image/jpeg", "width": 96, "height": 54,
+                    "duration_ms": None, "probe_metadata": None,
+                },
+                "staging_relative_path": "Temp/acquisitions/1/download.part",
+                "intended_relative_path": "Library/Images/recovered.jpg",
+            },
+        )
+        session.add(history)
+        session.commit()
+        history_id = history.id
+    service = AcquisitionService(catalog_settings, engine)
+    assert service.recover_incomplete() == 1
+    with Session(engine) as session:
+        history = session.get(MediaDownload, history_id)
+        asset = session.scalar(select(MediaAsset))
+        assert history is not None and history.status == "success"
+        assert history.request_metadata == {"network_transfer": True, "recovered": True}
+        assert asset is not None and asset.sha256 == digest
+        assert asset.technical_metadata["provider_acquisition"]["searches"][0]["query"] == "dark fireplace"
+    service.close()
+    engine.dispose()
+
+
+def test_recovery_marks_unvalidated_partial_as_interrupted(
+    catalog_settings: Settings,
+) -> None:
+    engine = initialize_database(catalog_settings)
+    with Session(engine) as session:
+        history = MediaDownload(
+            provider="pexels", provider_asset_id="906", media_type="image",
+            source_url=photo_result("906").source_url,
+            download_url=photo_result("906").download_url,
+            attempted_at=datetime.now(timezone.utc), status="started",
+            request_metadata={"network_transfer": True, "stage": "started"},
+        )
+        session.add(history)
+        session.commit()
+        history_id = history.id
+    partial = catalog_settings.root / f"Temp/acquisitions/{history_id}/download.part"
+    partial.parent.mkdir(parents=True)
+    partial.write_bytes(b"partial")
+    service = AcquisitionService(catalog_settings, engine)
+    assert service.recover_incomplete() == 0
+    assert not partial.exists()
+    with Session(engine) as session:
+        history = session.get(MediaDownload, history_id)
+        assert history is not None and history.status == "failed"
+        assert history.error_category == "interrupted"
     service.close()
     engine.dispose()

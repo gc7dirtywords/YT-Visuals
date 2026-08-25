@@ -7,8 +7,8 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import unicodedata
+import warnings
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,8 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
 import httpx
+from PIL import Image, UnidentifiedImageError
+from PIL.Image import DecompressionBombWarning
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
@@ -44,6 +46,13 @@ SENSITIVE_METADATA_KEYS = {
     "secret",
     "token",
 }
+
+PEXELS_DOWNLOAD_HOSTS = frozenset(
+    {"images.pexels.com", "videos.pexels.com", "player.vimeo.com"}
+)
+IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
+VIDEO_MIME_TYPES = frozenset({"video/mp4", "video/webm", "video/quicktime"})
+PEXELS_POLICY_REVIEWED_AT = datetime(2026, 8, 25, tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +86,34 @@ class DownloadedFile:
     file_size_bytes: int
     http_status_code: int
     content_type: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionContext:
+    workflow_id: str | None = None
+    package_id: str | None = None
+    beat_id: str | None = None
+    directive_index: int | None = None
+    provider_rank: int | None = None
+    executable_query: str | None = None
+    required_terms: tuple[str, ...] = ()
+    directive_media_type: str | None = None
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in asdict(self).items()
+            if value not in (None, (), [])
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedMedia:
+    mime_type: str
+    width: int
+    height: int
+    duration_ms: int | None = None
+    probe_metadata: dict[str, Any] | None = None
 
 
 class _TransferFailure(MediaDownloadError):
@@ -172,11 +209,15 @@ class AcquisitionService:
         http_client: httpx.Client | None = None,
         metadata_probe: MetadataProbe = probe_media_file,
         timeout_seconds: float = 60.0,
+        allowed_download_hosts: frozenset[str] | set[str] | None = None,
     ) -> None:
         self.settings = settings
         self.engine = engine
         self.metadata_probe = metadata_probe
         self.timeout_seconds = timeout_seconds
+        self.allowed_download_hosts = frozenset(
+            host.casefold() for host in (allowed_download_hosts or PEXELS_DOWNLOAD_HOSTS)
+        )
         self._owns_client = http_client is None
         self.http_client = http_client or httpx.Client(follow_redirects=True)
 
@@ -184,16 +225,121 @@ class AcquisitionService:
         if self._owns_client:
             self.http_client.close()
 
-    def acquire(self, result: MediaSearchResult) -> AcquisitionOutcome:
+    def recover_incomplete(self) -> int:
+        """Recover only files named by durable, incomplete acquisition journals."""
+        with Session(self.engine) as session:
+            history_ids = list(
+                session.scalars(
+                    select(MediaDownload.id).where(MediaDownload.status == "started")
+                )
+            )
+        recovered = 0
+        for history_id in history_ids:
+            if self._recover_one(history_id):
+                recovered += 1
+        return recovered
+
+    def _recover_one(self, history_id: int) -> bool:
+        with Session(self.engine) as session:
+            history = session.get(MediaDownload, history_id)
+            if history is None or history.status != "started":
+                return False
+            metadata = history.request_metadata if isinstance(history.request_metadata, dict) else {}
+            if metadata.get("stage") != "validated":
+                partial = self.settings.root / "Temp" / "acquisitions" / str(history_id) / "download.part"
+                partial.unlink(missing_ok=True)
+                _remove_empty_parents(partial.parent, self.settings.root / "Temp")
+                history.status = "failed"
+                history.completed_at = _utcnow()
+                history.error_category = "interrupted"
+                history.error_message = "Interrupted before media validation completed"
+                session.commit()
+                return False
+            try:
+                staging = _safe_root_relative(self.settings.root, metadata["staging_relative_path"])
+                destination = _safe_root_relative(self.settings.root, metadata["intended_relative_path"])
+                allowed_parent = self.settings.root / "Library" / (
+                    "Images" if history.media_type == "image" else "Videos"
+                )
+                destination.resolve(strict=False).relative_to(allowed_parent.resolve())
+                if not destination.is_file() and staging.is_file():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(staging, destination)
+                if not destination.is_file():
+                    raise MediaDownloadError("No validated media file survived the interrupted acquisition")
+                actual_sha, actual_size = _file_sha256(destination)
+                if actual_sha != history.sha256 or actual_size != history.downloaded_bytes:
+                    raise MediaDownloadError("Recovered media does not match its durable journal")
+                result = MediaSearchResult(**metadata["normalized_result"])
+                observed = ObservedMedia(**metadata["observed_media"])
+                asset = session.scalar(select(MediaAsset).where(MediaAsset.sha256 == actual_sha))
+                now = _utcnow()
+                relative = destination.relative_to(self.settings.root).as_posix()
+                stat = destination.stat()
+                if asset is None:
+                    asset = MediaAsset(
+                        relative_path=relative, media_type=result.media_type, title=result.title,
+                        description=result.description, mime_type=observed.mime_type,
+                        file_size_bytes=actual_size, sha256=actual_sha, width=observed.width,
+                        height=observed.height, duration_ms=observed.duration_ms,
+                        file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+                        last_verified_at=now,
+                        technical_metadata={
+                            "provider": _sanitize_metadata(result.raw_metadata),
+                            "download": {"content_type": history.content_type, "ffprobe": observed.probe_metadata},
+                            "provider_acquisition": _provider_acquisition_metadata(
+                                _context_from_metadata(metadata.get("selection"))
+                            ),
+                        },
+                    )
+                    session.add(asset)
+                    session.flush()
+                if not any(item.relative_path == relative for item in asset.locations):
+                    session.add(MediaLocation(
+                        asset=asset, relative_path=relative, status="available",
+                        provenance_type="provider_download", file_size_bytes=actual_size,
+                        file_modified_ns=stat.st_mtime_ns,
+                        file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+                        first_seen_at=now, last_seen_at=now,
+                    ))
+                asset.status = "active"
+                self._attach_source(session, asset, result)
+                self._attach_license_if_missing(asset, result)
+                self._merge_search_provenance(asset, _context_from_metadata(metadata.get("selection")))
+                downloaded = DownloadedFile(
+                    destination, actual_sha, actual_size,
+                    history.http_status_code or 200, history.content_type,
+                )
+                self._complete_history(
+                    history, status="success", asset=asset, downloaded=downloaded,
+                    request_metadata={"network_transfer": True, "recovered": True},
+                )
+                session.commit()
+                _remove_empty_parents(staging.parent, self.settings.root / "Temp")
+                return True
+            except Exception as exc:
+                session.rollback()
+                self._mark_failed(history_id, exc)
+                return False
+
+    def acquire(
+        self, result: MediaSearchResult, *, context: AcquisitionContext | None = None
+    ) -> AcquisitionOutcome:
         existing = self._existing_provider_asset(result)
         if existing is not None:
             return existing
 
-        history_id = self._begin_history(result)
+        history_id = self._begin_history(result, context)
         try:
-            downloaded = self._download(result)
+            downloaded = self._download(result, history_id)
+            observed = self._validate_media(downloaded, result)
         except Exception as exc:
             self._mark_failed(history_id, exc)
+            if "downloaded" in locals():
+                downloaded.temporary_path.unlink(missing_ok=True)
+                _remove_empty_parents(
+                    downloaded.temporary_path.parent, self.settings.root / "Temp"
+                )
             raise
 
         destination: Path | None = None
@@ -203,21 +349,47 @@ class AcquisitionService:
                 if history is None or history.status != "started":
                     raise RuntimeError(f"Download history {history_id} is not open")
 
+                known_source = self._find_source(
+                    session, result.provider, result.catalog_source_id
+                )
+                if (
+                    known_source is not None
+                    and known_source.asset.sha256
+                    and known_source.asset.sha256 != downloaded.sha256
+                ):
+                    raise MediaDownloadError(
+                        "Provider asset bytes changed from the cataloged SHA-256"
+                    )
+
                 duplicate_asset = session.scalar(
                     select(MediaAsset).where(MediaAsset.sha256 == downloaded.sha256)
                 )
                 if duplicate_asset is not None:
                     created_source = self._attach_source(session, duplicate_asset, result)
                     self._attach_license_if_missing(duplicate_asset, result)
+                    restored = False
+                    if not self._asset_file_available(duplicate_asset):
+                        self._restore_asset_file(
+                            session,
+                            history,
+                            duplicate_asset,
+                            result,
+                            downloaded,
+                            observed,
+                            context,
+                        )
+                        restored = True
+                    self._merge_search_provenance(duplicate_asset, context)
                     self._complete_history(
                         history,
-                        status="duplicate",
+                        status="success" if restored else "duplicate",
                         asset=duplicate_asset,
                         downloaded=downloaded,
                         request_metadata={
                             "network_transfer": True,
                             "reuse_reason": "sha256",
                             "source_attached": created_source,
+                            "restored_missing_asset": restored,
                         },
                     )
                     session.commit()
@@ -228,14 +400,22 @@ class AcquisitionService:
                         file_size_bytes=duplicate_asset.file_size_bytes or downloaded.file_size_bytes,
                         created_asset=False,
                         created_source=created_source,
-                        duplicate_reason="sha256",
+                        duplicate_reason="provider_asset" if known_source else "sha256",
                         download_history_id=history_id,
                     )
 
-                probe = self.metadata_probe(downloaded.temporary_path) if result.media_type == "video" else ProbeResult()
-                mime_type = self._effective_mime_type(downloaded.content_type, result.mime_type)
+                mime_type = observed.mime_type
                 destination = self._destination_path(
                     result, safe_filename(result, mime_type, downloaded.sha256)
+                )
+                self._record_validated_transfer(
+                    session,
+                    history,
+                    result,
+                    downloaded,
+                    observed,
+                    destination,
+                    context,
                 )
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(downloaded.temporary_path, destination)
@@ -251,18 +431,18 @@ class AcquisitionService:
                     mime_type=mime_type,
                     file_size_bytes=downloaded.file_size_bytes,
                     sha256=downloaded.sha256,
-                    width=probe.width or result.width,
-                    height=probe.height or result.height,
-                    duration_ms=probe.duration_ms if probe.duration_ms is not None else result.duration_ms,
+                    width=observed.width,
+                    height=observed.height,
+                    duration_ms=observed.duration_ms,
                     file_modified_at=datetime.fromtimestamp(destination_stat.st_mtime, tz=timezone.utc),
                     last_verified_at=observed_at,
                     technical_metadata={
                         "provider": _sanitize_metadata(result.raw_metadata),
                         "download": {
                             "content_type": downloaded.content_type,
-                            "ffprobe": probe.raw_metadata,
-                            "ffprobe_warning": probe.warning,
+                            "ffprobe": observed.probe_metadata,
                         },
+                        "provider_acquisition": _provider_acquisition_metadata(context),
                     },
                 )
                 session.add(asset)
@@ -302,12 +482,36 @@ class AcquisitionService:
                     download_history_id=history_id,
                 )
         except Exception as exc:
-            if destination is not None and destination.exists():
-                destination.unlink()
-            self._mark_failed(history_id, exc, downloaded=downloaded)
+            if not self._validated_file_survives(history_id):
+                self._mark_failed(history_id, exc, downloaded=downloaded)
             raise
         finally:
             downloaded.temporary_path.unlink(missing_ok=True)
+            _remove_empty_parents(downloaded.temporary_path.parent, self.settings.root / "Temp")
+
+    def _validated_file_survives(self, history_id: int) -> bool:
+        try:
+            with Session(self.engine) as session:
+                history = session.get(MediaDownload, history_id)
+                metadata = history.request_metadata if history else None
+                if not isinstance(metadata, dict) or metadata.get("stage") != "validated":
+                    return False
+                destination = _safe_root_relative(
+                    self.settings.root, str(metadata.get("intended_relative_path", ""))
+                )
+                return destination.is_file()
+        except Exception:
+            return False
+
+    def lookup_existing(
+        self, provider: str, media_type: str, provider_asset_id: str
+    ) -> AcquisitionOutcome | None:
+        catalog_source_id = _catalog_source_id(media_type, provider_asset_id)
+        with Session(self.engine) as session:
+            source = self._find_source(session, provider, catalog_source_id)
+            if source is None:
+                return None
+            return self._outcome_for_existing_source(source, None)
 
     def find_existing(
         self, provider: str, media_type: str, provider_asset_id: str
@@ -333,6 +537,8 @@ class AcquisitionService:
         with Session(self.engine) as session:
             source = self._find_source(session, result.provider, result.catalog_source_id)
             if source is None:
+                return None
+            if not self._source_file_available(source):
                 return None
             history_id = self._record_reuse(
                 session,
@@ -361,7 +567,7 @@ class AcquisitionService:
 
     @staticmethod
     def _outcome_for_existing_source(
-        source: MediaSource, history_id: int
+        source: MediaSource, history_id: int | None
     ) -> AcquisitionOutcome:
         asset = source.asset
         return AcquisitionOutcome(
@@ -375,7 +581,134 @@ class AcquisitionService:
             download_history_id=history_id,
         )
 
-    def _begin_history(self, result: MediaSearchResult) -> int:
+    def _source_file_available(self, source: MediaSource) -> bool:
+        return self._asset_file_available(source.asset)
+
+    def _asset_file_available(self, asset: MediaAsset) -> bool:
+        for location in asset.locations:
+            if location.status != "available":
+                continue
+            try:
+                path = _safe_root_relative(self.settings.root, location.relative_path)
+            except MediaDownloadError:
+                continue
+            if path.is_file():
+                return True
+        if not asset.locations and asset.status == "active":
+            try:
+                return _safe_root_relative(self.settings.root, asset.relative_path).is_file()
+            except MediaDownloadError:
+                return False
+        return False
+
+    def _record_validated_transfer(
+        self,
+        session: Session,
+        history: MediaDownload,
+        result: MediaSearchResult,
+        downloaded: DownloadedFile,
+        observed: ObservedMedia,
+        destination: Path,
+        context: AcquisitionContext | None,
+    ) -> None:
+        relative = destination.resolve(strict=False).relative_to(
+            self.settings.root.resolve()
+        ).as_posix()
+        if history.status != "started":
+            raise MediaDownloadError("Download history is not available for finalization")
+        history.relative_path = relative
+        history.sha256 = downloaded.sha256
+        history.downloaded_bytes = downloaded.file_size_bytes
+        history.http_status_code = downloaded.http_status_code
+        history.content_type = downloaded.content_type
+        history.request_metadata = {
+            "network_transfer": True,
+            "stage": "validated",
+            "selection": context.to_metadata() if context else {},
+            "normalized_result": _sanitize_metadata(result.to_dict()),
+            "observed_media": asdict(observed),
+            "staging_relative_path": downloaded.temporary_path.relative_to(
+                self.settings.root
+            ).as_posix(),
+            "intended_relative_path": relative,
+        }
+        session.commit()
+
+    def _restore_asset_file(
+        self,
+        session: Session,
+        history: MediaDownload,
+        asset: MediaAsset,
+        result: MediaSearchResult,
+        downloaded: DownloadedFile,
+        observed: ObservedMedia,
+        context: AcquisitionContext | None,
+    ) -> None:
+        destination = self._destination_path(
+            result, safe_filename(result, observed.mime_type, downloaded.sha256)
+        )
+        self._record_validated_transfer(
+            session, history, result, downloaded, observed, destination, context
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(downloaded.temporary_path, destination)
+        stat = destination.stat()
+        now = _utcnow()
+        relative = destination.relative_to(self.settings.root).as_posix()
+        asset.relative_path = relative
+        asset.status = "active"
+        asset.mime_type = observed.mime_type
+        asset.file_size_bytes = downloaded.file_size_bytes
+        asset.sha256 = downloaded.sha256
+        asset.width = observed.width
+        asset.height = observed.height
+        asset.duration_ms = observed.duration_ms
+        asset.file_modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        asset.last_verified_at = now
+        existing_location = next(
+            (item for item in asset.locations if item.relative_path == relative), None
+        )
+        if existing_location is None:
+            session.add(MediaLocation(
+                asset=asset,
+                relative_path=relative,
+                status="available",
+                provenance_type="provider_download",
+                file_size_bytes=stat.st_size,
+                file_modified_ns=stat.st_mtime_ns,
+                file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+                first_seen_at=now,
+                last_seen_at=now,
+            ))
+        else:
+            existing_location.status = "available"
+            existing_location.provenance_type = "provider_download"
+            existing_location.file_size_bytes = stat.st_size
+            existing_location.file_modified_ns = stat.st_mtime_ns
+            existing_location.file_modified_at = datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc
+            )
+            existing_location.last_seen_at = now
+            existing_location.missing_since = None
+
+    @staticmethod
+    def _merge_search_provenance(
+        asset: MediaAsset, context: AcquisitionContext | None
+    ) -> None:
+        provenance = _search_provenance(context)
+        if not provenance:
+            return
+        metadata = dict(asset.technical_metadata or {})
+        existing = metadata.get("provider_acquisition")
+        entries = list(existing.get("searches", [])) if isinstance(existing, dict) else []
+        if provenance not in entries:
+            entries.append(provenance)
+        metadata["provider_acquisition"] = {"searches": entries}
+        asset.technical_metadata = metadata
+
+    def _begin_history(
+        self, result: MediaSearchResult, context: AcquisitionContext | None
+    ) -> int:
         with Session(self.engine) as session:
             history = MediaDownload(
                 provider=result.provider,
@@ -386,7 +719,11 @@ class AcquisitionService:
                 attempted_at=_utcnow(),
                 status="started",
                 provider_metadata=_sanitize_metadata(result.raw_metadata),
-                request_metadata={"network_transfer": True},
+                request_metadata={
+                    "network_transfer": True,
+                    "stage": "started",
+                    "selection": context.to_metadata() if context else {},
+                },
             )
             session.add(history)
             session.commit()
@@ -473,25 +810,33 @@ class AcquisitionService:
                     history.content_type = downloaded.content_type
                     history.downloaded_bytes = downloaded.file_size_bytes
                     history.sha256 = downloaded.sha256
+                prior_metadata = history.request_metadata or {}
                 history.request_metadata = {
                     "network_transfer": True,
                     "failure_stage": "transfer" if isinstance(error, _TransferFailure) else "ingestion",
+                    "selection": prior_metadata.get("selection", {}),
                 }
                 session.commit()
         except Exception:
             # Preserve the original acquisition exception if audit finalization itself fails.
             return
 
-    def _download(self, result: MediaSearchResult) -> DownloadedFile:
-        self.settings.root.joinpath("Temp").mkdir(parents=True, exist_ok=True)
-        handle = tempfile.NamedTemporaryFile(
-            mode="wb", prefix="yt-visuals-", suffix=".part", dir=self.settings.root / "Temp", delete=False
-        )
-        temporary_path = Path(handle.name)
+    def _download(self, result: MediaSearchResult, history_id: int) -> DownloadedFile:
+        self._validate_download_url(result.download_url)
+        staging_dir = self.settings.root / "Temp" / "acquisitions" / str(history_id)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path = staging_dir / "download.part"
+        temporary_path.unlink(missing_ok=True)
+        handle = temporary_path.open("wb")
         digest = hashlib.sha256()
         byte_count = 0
         content_type: str | None = None
         http_status_code: int | None = None
+        limit = (
+            self.settings.max_image_download_bytes
+            if result.media_type == "image"
+            else self.settings.max_video_download_bytes
+        )
         try:
             with handle:
                 try:
@@ -500,7 +845,8 @@ class AcquisitionService:
                     ) as response:
                         http_status_code = response.status_code
                         content_type = response.headers.get("Content-Type")
-                        if response.status_code >= 400:
+                        self._validate_download_url(str(response.url))
+                        if not 200 <= response.status_code < 300:
                             raise _TransferFailure(
                                 "http",
                                 f"Media download returned HTTP {response.status_code}",
@@ -508,12 +854,43 @@ class AcquisitionService:
                                 content_type=content_type,
                                 downloaded_bytes=0,
                             )
+                        content_length = response.headers.get("Content-Length")
+                        if content_length is not None:
+                            try:
+                                declared_length = int(content_length)
+                            except ValueError as exc:
+                                raise _TransferFailure(
+                                    "invalid_content_length",
+                                    "Media download returned an invalid Content-Length",
+                                    http_status_code=response.status_code,
+                                    content_type=content_type,
+                                    downloaded_bytes=0,
+                                ) from exc
+                            if declared_length < 0 or declared_length > limit:
+                                raise _TransferFailure(
+                                    "too_large",
+                                    f"Media download exceeds the configured {limit}-byte limit",
+                                    http_status_code=response.status_code,
+                                    content_type=content_type,
+                                    downloaded_bytes=0,
+                                )
                         for chunk in response.iter_bytes(chunk_size=64 * 1024):
                             if not chunk:
                                 continue
                             handle.write(chunk)
                             digest.update(chunk)
                             byte_count += len(chunk)
+                            if byte_count > limit:
+                                raise _TransferFailure(
+                                    "too_large",
+                                    f"Media download exceeds the configured {limit}-byte limit",
+                                    http_status_code=response.status_code,
+                                    content_type=content_type,
+                                    downloaded_bytes=byte_count,
+                                    sha256=digest.hexdigest(),
+                                )
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 except httpx.TimeoutException as exc:
                     raise _TransferFailure(
                         "timeout",
@@ -549,7 +926,89 @@ class AcquisitionService:
             )
         except Exception:
             temporary_path.unlink(missing_ok=True)
+            _remove_empty_parents(temporary_path.parent, self.settings.root / "Temp")
             raise
+
+    def _validate_download_url(self, url: str) -> None:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").casefold()
+        if parsed.scheme.casefold() != "https" or not host:
+            raise _TransferFailure("unsafe_url", "Provider media URL must use HTTPS")
+        if not any(host == allowed or host.endswith(f".{allowed}") for allowed in self.allowed_download_hosts):
+            raise _TransferFailure("unsafe_host", "Provider media URL host is not allowlisted")
+
+    def _validate_media(
+        self, downloaded: DownloadedFile, result: MediaSearchResult
+    ) -> ObservedMedia:
+        declared = self._effective_mime_type(downloaded.content_type, result.mime_type)
+        if result.media_type == "image":
+            if declared not in IMAGE_MIME_TYPES:
+                raise _TransferFailure(
+                    "mime_mismatch",
+                    "Downloaded response is not an approved image MIME type",
+                    http_status_code=downloaded.http_status_code,
+                    content_type=downloaded.content_type,
+                    downloaded_bytes=downloaded.file_size_bytes,
+                    sha256=downloaded.sha256,
+                )
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", DecompressionBombWarning)
+                    with Image.open(downloaded.temporary_path) as image:
+                        image.verify()
+                    with Image.open(downloaded.temporary_path) as image:
+                        image.load()
+                        width, height = image.size
+                        observed_mime = Image.MIME.get(image.format or "")
+            except (OSError, UnidentifiedImageError, DecompressionBombWarning) as exc:
+                raise _TransferFailure(
+                    "invalid_image",
+                    "Downloaded image could not be decoded safely",
+                    http_status_code=downloaded.http_status_code,
+                    content_type=downloaded.content_type,
+                    downloaded_bytes=downloaded.file_size_bytes,
+                    sha256=downloaded.sha256,
+                ) from exc
+            if observed_mime not in IMAGE_MIME_TYPES or width <= 0 or height <= 0:
+                raise _TransferFailure("invalid_image", "Downloaded image metadata is invalid")
+            if declared != observed_mime:
+                raise _TransferFailure("mime_mismatch", "Downloaded image MIME does not match its bytes")
+            return ObservedMedia(observed_mime, width, height)
+
+        if declared not in VIDEO_MIME_TYPES:
+            raise _TransferFailure(
+                "mime_mismatch",
+                "Downloaded response is not an approved video MIME type",
+                http_status_code=downloaded.http_status_code,
+                content_type=downloaded.content_type,
+                downloaded_bytes=downloaded.file_size_bytes,
+                sha256=downloaded.sha256,
+            )
+        probe = self.metadata_probe(downloaded.temporary_path)
+        if (
+            probe.warning
+            or probe.width is None
+            or probe.height is None
+            or probe.duration_ms is None
+            or probe.width <= 0
+            or probe.height <= 0
+            or probe.duration_ms <= 0
+        ):
+            raise _TransferFailure(
+                "invalid_video",
+                "Downloaded video could not be probed as usable media",
+                http_status_code=downloaded.http_status_code,
+                content_type=downloaded.content_type,
+                downloaded_bytes=downloaded.file_size_bytes,
+                sha256=downloaded.sha256,
+            )
+        return ObservedMedia(
+            declared,
+            probe.width,
+            probe.height,
+            probe.duration_ms,
+            probe.raw_metadata,
+        )
 
     def _attach_source(
         self, session: Session, asset: MediaAsset, result: MediaSearchResult
@@ -598,7 +1057,9 @@ class AcquisitionService:
             usage_terms=result.license_notes,
             commercial_use_allowed=result.commercial_use_allowed,
             modifications_allowed=result.modifications_allowed,
-            verified_at=_utcnow(),
+            verified_at=(
+                PEXELS_POLICY_REVIEWED_AT if result.provider.casefold() == "pexels" else None
+            ),
         )
 
     def _destination_path(self, result: MediaSearchResult, filename: str) -> Path:
@@ -610,14 +1071,13 @@ class AcquisitionService:
         while candidate.exists():
             candidate = directory / f"{Path(filename).stem}-{counter}{Path(filename).suffix}"
             counter += 1
+        candidate.resolve(strict=False).relative_to(directory.resolve())
         return candidate
 
     @staticmethod
-    def _effective_mime_type(downloaded: str | None, provider_value: str | None) -> str | None:
+    def _effective_mime_type(downloaded: str | None, _provider_value: str | None) -> str | None:
         downloaded = downloaded.split(";", 1)[0].strip().lower() if downloaded else None
-        if downloaded and downloaded != "application/octet-stream":
-            return downloaded
-        return provider_value
+        return downloaded
 
 
 def _catalog_source_id(media_type: str, provider_asset_id: str) -> str:
@@ -626,7 +1086,9 @@ def _catalog_source_id(media_type: str, provider_asset_id: str) -> str:
 
 
 def _sanitize_metadata(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, str):
+        return _redact_text(value)
+    if value is None or isinstance(value, (int, float, bool)):
         return value
     if isinstance(value, dict):
         return {
@@ -687,3 +1149,67 @@ def _extension_for(mime_type: str | None, url: str) -> str:
 def _original_filename(url: str) -> str | None:
     name = unquote(Path(urlsplit(url).path).name).strip()
     return name[:512] or None
+
+
+def _search_provenance(context: AcquisitionContext | None) -> dict[str, Any]:
+    if context is None or not context.executable_query:
+        return {}
+    return {
+        "query": context.executable_query,
+        "required_terms": list(context.required_terms),
+        "media_type": context.directive_media_type,
+        "directive_index": context.directive_index,
+    }
+
+
+def _provider_acquisition_metadata(
+    context: AcquisitionContext | None,
+) -> dict[str, Any]:
+    provenance = _search_provenance(context)
+    return {"searches": [provenance]} if provenance else {"searches": []}
+
+
+def _safe_root_relative(root: Path, relative_path: str) -> Path:
+    candidate = Path(relative_path.replace("/", "\\"))
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise MediaDownloadError("Unsafe catalog-relative path")
+    resolved = (root / candidate).resolve(strict=False)
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError as exc:
+        raise MediaDownloadError("Catalog path escapes the configured root") from exc
+    return resolved
+
+
+def _remove_empty_parents(path: Path, stop: Path) -> None:
+    stop = stop.resolve(strict=False)
+    current = path.resolve(strict=False)
+    while current != stop:
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _file_sha256(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _context_from_metadata(value: Any) -> AcquisitionContext | None:
+    if not isinstance(value, dict):
+        return None
+    allowed = {field.name for field in AcquisitionContext.__dataclass_fields__.values()}
+    normalized = {key: item for key, item in value.items() if key in allowed}
+    if isinstance(normalized.get("required_terms"), list):
+        normalized["required_terms"] = tuple(normalized["required_terms"])
+    try:
+        return AcquisitionContext(**normalized)
+    except TypeError:
+        return None

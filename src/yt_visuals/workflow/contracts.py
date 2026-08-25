@@ -307,6 +307,32 @@ class CompletedBlockedGuidanceEntry(ContractModel):
     editorial_guidance: CompletedBlockedGuidance
 
 
+class BlockedReasonV2(ContractModel):
+    code: Literal[
+        "no_local_matches", "all_matches_excluded",
+        "no_technically_eligible_matches", "preview_generation_failed",
+        "no_external_provider_matches", "all_external_provider_matches_excluded",
+        "no_external_provider_technically_eligible_matches",
+    ]
+    explanation: str = Field(min_length=1)
+
+
+class BlockedGuidanceTemplateEntryV2(ContractModel):
+    entry_type: Literal["blocked_beat_guidance"]
+    beat_id: str
+    sequence: int = Field(ge=1)
+    blocked_reason: BlockedReasonV2
+    editorial_guidance: BlankBlockedGuidance
+
+
+class CompletedBlockedGuidanceEntryV2(ContractModel):
+    entry_type: Literal["blocked_beat_guidance"]
+    beat_id: str
+    sequence: int = Field(ge=1)
+    blocked_reason: BlockedReasonV2
+    editorial_guidance: CompletedBlockedGuidance
+
+
 CompletedReviewEntry = Annotated[
     CompletedCandidateReviewEntry | CompletedBlockedGuidanceEntry,
     Field(discriminator="entry_type"),
@@ -322,6 +348,44 @@ class VisualReviewDocument(ContractModel):
 
     @model_validator(mode="after")
     def unique_entries(self) -> "VisualReviewDocument":
+        _validate_review_entry_identity(self.review_entries)
+        return self
+
+
+TemplateEntryV2 = Annotated[
+    CandidateReviewTemplateEntry | BlockedGuidanceTemplateEntryV2,
+    Field(discriminator="entry_type"),
+]
+
+
+CompletedReviewEntryV2 = Annotated[
+    CompletedCandidateReviewEntry | CompletedBlockedGuidanceEntryV2,
+    Field(discriminator="entry_type"),
+]
+
+
+class VisualReviewTemplateV2(ContractModel):
+    document_type: Literal["visual_review"]
+    contract_version: Literal[2]
+    bookkeeping: ReviewBookkeeping
+    story: ReviewStory
+    review_entries: tuple[TemplateEntryV2, ...]
+
+    @model_validator(mode="after")
+    def unique_entries(self) -> "VisualReviewTemplateV2":
+        _validate_review_entry_identity(self.review_entries)
+        return self
+
+
+class VisualReviewDocumentV2(ContractModel):
+    document_type: Literal["visual_review"]
+    contract_version: Literal[2]
+    bookkeeping: ReviewBookkeeping
+    story: ReviewStory
+    review_entries: tuple[CompletedReviewEntryV2, ...]
+
+    @model_validator(mode="after")
+    def unique_entries(self) -> "VisualReviewDocumentV2":
         _validate_review_entry_identity(self.review_entries)
         return self
 
@@ -511,6 +575,58 @@ class CandidateReport(ContractModel):
         return self
 
 
+class ReportBlockedReasonV2(ContractModel):
+    code: Literal[
+        "no_local_matches", "all_matches_excluded",
+        "no_technically_eligible_matches", "preview_generation_failed",
+        "no_external_provider_matches", "all_external_provider_matches_excluded",
+        "no_external_provider_technically_eligible_matches",
+        "file_unavailable", "asset_hash_mismatch", "catalog_identity_mismatch",
+    ]
+    explanation: str
+
+
+class CandidateReportBeatV2(ContractModel):
+    beat_id: str
+    sequence: int = Field(ge=1)
+    state: Literal[
+        "review_required", "locked_accepted", "blocked_no_candidate", "blocked_missing"
+    ]
+    request_snapshot: ReportRequestSnapshot
+    candidates: tuple[ReportCandidate, ...] = Field(max_length=1)
+    blocked_reason: ReportBlockedReasonV2 | None
+    lock: ReportLock | None
+
+    @model_validator(mode="after")
+    def state_shape(self) -> "CandidateReportBeatV2":
+        _validate_report_beat_shape(self)
+        return self
+
+
+class CandidateReportV2(ContractModel):
+    document_type: Literal["candidate_report"]
+    contract_version: Literal[2]
+    workflow_id: str
+    request_id: str
+    request_revision: int = Field(ge=1)
+    request_document_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    package_id: str
+    review_id: str
+    iteration: int = Field(ge=1)
+    generated_at: str
+    story: ReportStory
+    review_threshold: Literal[90]
+    expected_storyboard: ExpectedArtifact
+    expected_review_template: ExpectedArtifact
+    summary: ReportSummary
+    beats: tuple[CandidateReportBeatV2, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def consistent_beats(self) -> "CandidateReportV2":
+        _validate_candidate_report(self)
+        return self
+
+
 def _validate_review_entry_identity(entries: tuple[Any, ...]) -> None:
     identities = [(entry.beat_id, entry.sequence) for entry in entries]
     if len(identities) != len(set(identities)):
@@ -518,6 +634,39 @@ def _validate_review_entry_identity(entries: tuple[Any, ...]) -> None:
     sequences = [entry.sequence for entry in entries]
     if sequences != sorted(sequences):
         raise ValueError("review entries must remain in beat sequence order")
+
+
+def _validate_report_beat_shape(beat: Any) -> None:
+    count = len(beat.candidates)
+    if beat.state == "review_required":
+        if count != 1 or beat.blocked_reason is not None or beat.lock is not None:
+            raise ValueError("review_required requires exactly one candidate and no block or lock")
+    elif beat.state == "locked_accepted":
+        if count != 1 or beat.blocked_reason is not None or beat.lock is None:
+            raise ValueError("locked_accepted requires exactly one candidate and a lock")
+    elif beat.state == "blocked_no_candidate":
+        if count != 0 or beat.blocked_reason is None or beat.lock is not None:
+            raise ValueError("blocked_no_candidate requires a reason and no candidate or lock")
+    elif beat.blocked_reason is None or beat.lock is None:
+        raise ValueError("blocked_missing requires a deterministic reason and retained lock")
+
+
+def _validate_candidate_report(report: Any) -> None:
+    ids = [beat.beat_id for beat in report.beats]
+    sequences = [beat.sequence for beat in report.beats]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Candidate Report beat IDs must be unique")
+    if sequences != list(range(1, len(report.beats) + 1)):
+        raise ValueError("Candidate Report beat sequences must be contiguous and ordered")
+    expected = {
+        "total_beats": len(report.beats),
+        "review_required": sum(beat.state == "review_required" for beat in report.beats),
+        "locked_accepted": sum(beat.state == "locked_accepted" for beat in report.beats),
+        "blocked_no_candidate": sum(beat.state == "blocked_no_candidate" for beat in report.beats),
+        "blocked_missing": sum(beat.state == "blocked_missing" for beat in report.beats),
+    }
+    if report.summary.model_dump() != expected:
+        raise ValueError("Candidate Report summary does not match beat states")
 
 
 def canonical_json(value: Any) -> bytes:
@@ -557,7 +706,19 @@ def schema_documents() -> dict[str, dict[str, Any]]:
         "candidate-report.v1.schema.json": CandidateReport.model_json_schema(),
         "visual-review-template.v1.schema.json": VisualReviewTemplate.model_json_schema(),
         "visual-review.v1.schema.json": VisualReviewDocument.model_json_schema(),
+        "candidate-report.v2.schema.json": CandidateReportV2.model_json_schema(),
+        "visual-review-template.v2.schema.json": VisualReviewTemplateV2.model_json_schema(),
+        "visual-review.v2.schema.json": VisualReviewDocumentV2.model_json_schema(),
     }
+
+
+def validate_visual_review_document(value: Any) -> VisualReviewDocument | VisualReviewDocumentV2:
+    version = value.get("contract_version") if isinstance(value, dict) else None
+    if version == 1:
+        return VisualReviewDocument.model_validate(value)
+    if version == 2:
+        return VisualReviewDocumentV2.model_validate(value)
+    raise ValueError(f"Unsupported Visual Review contract_version: {version}")
 
 
 def validate_template_entry(value: Any) -> CandidateReviewTemplateEntry | BlockedGuidanceTemplateEntry:

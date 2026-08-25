@@ -89,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     visual_validate.add_argument("path")
     visual_validate.add_argument("--json", action="store_true", help="Print normalized machine-readable JSON")
 
-    visual_workflow = visual_subparsers.add_parser("workflow", help="Run the local story review loop")
+    visual_workflow = visual_subparsers.add_parser("workflow", help="Run the story visual review loop")
     visual_workflow_subparsers = visual_workflow.add_subparsers(dest="visual_workflow_command", required=True)
     workflow_start = visual_workflow_subparsers.add_parser("start", help="Start a workflow from a Visual Request")
     workflow_start.add_argument("path")
@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_revise.add_argument("workflow_id")
     workflow_revise.add_argument("path")
     workflow_revise.add_argument("--json", action="store_true")
-    workflow_source = visual_workflow_subparsers.add_parser("source", help="Generate the next local candidate package")
+    workflow_source = visual_workflow_subparsers.add_parser("source", help="Generate the next local-first candidate package")
     workflow_source.add_argument("workflow_id")
     workflow_source.add_argument("--json", action="store_true")
     workflow_status = visual_workflow_subparsers.add_parser("status", help="Show workflow state")
@@ -159,7 +159,7 @@ def cli(
         if args.command == "library":
             return _library(args, settings)
         if args.command == "visual":
-            return _visual(args, settings)
+            return _visual(args, settings, provider_factory, acquisition_factory)
     except MediaServiceError as exc:
         print(f"Error [{exc.code}]: {exc}")
         return 1
@@ -175,7 +175,12 @@ def cli(
     return 2
 
 
-def _visual(args: argparse.Namespace, settings: Settings) -> int:
+def _visual(
+    args: argparse.Namespace,
+    settings: Settings,
+    provider_factory: ProviderFactory = create_provider,
+    acquisition_factory: AcquisitionFactory = AcquisitionService,
+) -> int:
     if args.visual_command == "request" and args.visual_request_command == "validate":
         request = VisualWorkflowService.validate_request_file(Path(args.path))
         if args.json:
@@ -188,7 +193,12 @@ def _visual(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     engine = initialize_database(settings)
-    service = VisualWorkflowService(settings, engine)
+    service = VisualWorkflowService(
+        settings,
+        engine,
+        provider_factory=provider_factory,
+        acquisition_factory=acquisition_factory,
+    )
     try:
         command = args.visual_workflow_command
         if command == "start":

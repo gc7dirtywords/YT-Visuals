@@ -465,6 +465,7 @@ def _rank_asset(
     tags = {tag.name.casefold() for tag in asset.tags}
     creators = " ".join(item.creator_name or "" for item in asset.sources).casefold()
     providers = " ".join(item.provider.name if item.provider else "" for item in asset.sources).casefold()
+    acquisition = _provider_search_text(asset).casefold()
     query = request.query.casefold().strip()
     if query and query in path:
         score += 25
@@ -491,6 +492,9 @@ def _rank_asset(
         if token in description:
             score += 4
             reasons.append(f"description:{token}:+4")
+        if token in acquisition:
+            score += 12
+            reasons.append(f"provider_search_provenance:{token}:+12")
     if request.media_type:
         score += 5
         reasons.append("media_type_match:+5")
@@ -513,6 +517,7 @@ def _matches_all_tokens(asset: MediaAsset, tokens: tuple[str, ...]) -> bool:
             asset.title or "",
             asset.description or "",
             asset.mime_type or "",
+            _provider_search_text(asset),
             *(tag.name for tag in asset.tags),
             *(source.creator_name or "" for source in asset.sources),
             *(source.provider.name if source.provider else "" for source in asset.sources),
@@ -528,6 +533,30 @@ def _matches_all_tokens(asset: MediaAsset, tokens: tuple[str, ...]) -> bool:
         ]
     ).casefold()
     return all(token in text for token in tokens)
+
+
+def _provider_search_text(asset: MediaAsset) -> str:
+    """Return only the namespaced, deterministic acquisition search terms."""
+    metadata = asset.technical_metadata
+    if not isinstance(metadata, dict):
+        return ""
+    acquisition = metadata.get("provider_acquisition")
+    if not isinstance(acquisition, dict):
+        return ""
+    searches = acquisition.get("searches")
+    if not isinstance(searches, list):
+        return ""
+    values: list[str] = []
+    for search in searches:
+        if not isinstance(search, dict):
+            continue
+        query = search.get("query")
+        if isinstance(query, str):
+            values.append(query)
+        required_terms = search.get("required_terms")
+        if isinstance(required_terms, list):
+            values.extend(item for item in required_terms if isinstance(item, str))
+    return " ".join(values)
 
 
 def _usage_project_clause(project_id: int):

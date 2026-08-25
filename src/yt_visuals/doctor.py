@@ -43,6 +43,13 @@ def probe_media_tool(name: str) -> tuple[bool, str]:
 
 def run_doctor(settings: Settings, tool_probe: ToolProbe = probe_media_tool) -> list[CheckResult]:
     results: list[CheckResult] = []
+    results.append(
+        CheckResult(
+            "provider:pexels",
+            True,
+            "configured" if settings.pexels_api_key else "not configured; local-only workflows remain available",
+        )
+    )
     for relative_path in EXPECTED_DIRECTORIES:
         path = settings.root / relative_path
         results.append(
@@ -80,4 +87,3 @@ def run_doctor(settings: Settings, tool_probe: ToolProbe = probe_media_tool) -> 
 
 def all_checks_pass(results: list[CheckResult]) -> bool:
     return all(result.ok for result in results)
-

@@ -1,0 +1,616 @@
+{
+  "$defs": {
+    "BlockedReasonV2": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "no_local_matches",
+            "all_matches_excluded",
+            "no_technically_eligible_matches",
+            "preview_generation_failed",
+            "no_external_provider_matches",
+            "all_external_provider_matches_excluded",
+            "no_external_provider_technically_eligible_matches"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "explanation": {
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "explanation"
+      ],
+      "title": "BlockedReasonV2",
+      "type": "object"
+    },
+    "CandidateReference": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "exclusiveMinimum": 0,
+          "title": "Asset Id",
+          "type": "integer"
+        },
+        "asset_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Asset Sha256",
+          "type": "string"
+        },
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "asset_id",
+        "asset_sha256"
+      ],
+      "title": "CandidateReference",
+      "type": "object"
+    },
+    "CatalogAnnotations": {
+      "additionalProperties": false,
+      "properties": {
+        "descriptive_tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Descriptive Tags",
+          "type": "array"
+        },
+        "historical_era": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Historical Era"
+        },
+        "moods": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Moods",
+          "type": "array"
+        },
+        "setting": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Setting"
+        },
+        "visual_concepts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Visual Concepts",
+          "type": "array"
+        }
+      },
+      "title": "CatalogAnnotations",
+      "type": "object"
+    },
+    "CompletedBlockedGuidance": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "revise_search",
+          "title": "Action",
+          "type": "string"
+        },
+        "replacement_guidance": {
+          "$ref": "#/$defs/ReplacementGuidance"
+        }
+      },
+      "required": [
+        "action",
+        "replacement_guidance"
+      ],
+      "title": "CompletedBlockedGuidance",
+      "type": "object"
+    },
+    "CompletedBlockedGuidanceEntryV2": {
+      "additionalProperties": false,
+      "properties": {
+        "beat_id": {
+          "title": "Beat Id",
+          "type": "string"
+        },
+        "blocked_reason": {
+          "$ref": "#/$defs/BlockedReasonV2"
+        },
+        "editorial_guidance": {
+          "$ref": "#/$defs/CompletedBlockedGuidance"
+        },
+        "entry_type": {
+          "const": "blocked_beat_guidance",
+          "title": "Entry Type",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entry_type",
+        "beat_id",
+        "sequence",
+        "blocked_reason",
+        "editorial_guidance"
+      ],
+      "title": "CompletedBlockedGuidanceEntryV2",
+      "type": "object"
+    },
+    "CompletedCandidateEditorialReview": {
+      "additionalProperties": false,
+      "properties": {
+        "alignment_score": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Alignment Score",
+          "type": "integer"
+        },
+        "catalog_annotations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CatalogAnnotations"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "decision": {
+          "enum": [
+            "accept",
+            "replace"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "mismatch_explanation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mismatch Explanation"
+        },
+        "mismatch_reasons": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MismatchReason"
+          },
+          "title": "Mismatch Reasons",
+          "type": "array"
+        },
+        "replacement_guidance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReplacementGuidance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "alignment_score",
+        "decision",
+        "replacement_guidance"
+      ],
+      "title": "CompletedCandidateEditorialReview",
+      "type": "object"
+    },
+    "CompletedCandidateReviewEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "beat_id": {
+          "title": "Beat Id",
+          "type": "string"
+        },
+        "candidate": {
+          "$ref": "#/$defs/CandidateReference"
+        },
+        "editorial_review": {
+          "$ref": "#/$defs/CompletedCandidateEditorialReview"
+        },
+        "entry_type": {
+          "const": "candidate_review",
+          "title": "Entry Type",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entry_type",
+        "beat_id",
+        "sequence",
+        "candidate",
+        "editorial_review"
+      ],
+      "title": "CompletedCandidateReviewEntry",
+      "type": "object"
+    },
+    "MismatchReason": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "subject",
+            "narrative_relevance",
+            "setting",
+            "historical_era",
+            "mood",
+            "composition",
+            "presentation_style",
+            "media_type",
+            "duration",
+            "technical_quality",
+            "repetition",
+            "licensing",
+            "other"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "explanation": {
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "category",
+        "explanation"
+      ],
+      "title": "MismatchReason",
+      "type": "object"
+    },
+    "ReplacementGuidance": {
+      "additionalProperties": false,
+      "properties": {
+        "avoid": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Avoid",
+          "type": "array"
+        },
+        "external_sourcing_allowed": {
+          "title": "External Sourcing Allowed",
+          "type": "boolean"
+        },
+        "media_preference_change": {
+          "anyOf": [
+            {
+              "enum": [
+                "image",
+                "video",
+                "either"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Media Preference Change"
+        },
+        "must_have": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Must Have",
+          "type": "array"
+        },
+        "preferred": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Preferred",
+          "type": "array"
+        },
+        "revised_search_directives": {
+          "items": {
+            "$ref": "#/$defs/SearchDirective"
+          },
+          "minItems": 1,
+          "title": "Revised Search Directives",
+          "type": "array"
+        },
+        "summary": {
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary",
+        "revised_search_directives",
+        "external_sourcing_allowed"
+      ],
+      "title": "ReplacementGuidance",
+      "type": "object"
+    },
+    "ReviewBookkeeping": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Report Sha256",
+          "type": "string"
+        },
+        "iteration": {
+          "minimum": 1,
+          "title": "Iteration",
+          "type": "integer"
+        },
+        "package_id": {
+          "title": "Package Id",
+          "type": "string"
+        },
+        "request_document_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Request Document Sha256",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "request_revision": {
+          "minimum": 1,
+          "title": "Request Revision",
+          "type": "integer"
+        },
+        "review_id": {
+          "title": "Review Id",
+          "type": "string"
+        },
+        "storyboard_pdf_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Storyboard Pdf Sha256",
+          "type": "string"
+        },
+        "workflow_id": {
+          "title": "Workflow Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "request_id",
+        "request_revision",
+        "request_document_sha256",
+        "package_id",
+        "candidate_report_sha256",
+        "storyboard_pdf_sha256",
+        "review_id",
+        "iteration"
+      ],
+      "title": "ReviewBookkeeping",
+      "type": "object"
+    },
+    "ReviewStory": {
+      "additionalProperties": false,
+      "properties": {
+        "story_id": {
+          "title": "Story Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "story_id"
+      ],
+      "title": "ReviewStory",
+      "type": "object"
+    },
+    "SearchDirective": {
+      "additionalProperties": false,
+      "properties": {
+        "excluded_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Excluded Terms",
+          "type": "array"
+        },
+        "filters": {
+          "$ref": "#/$defs/SearchFilters"
+        },
+        "media_type": {
+          "enum": [
+            "image",
+            "video",
+            "either"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "query": {
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "required_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "query",
+        "media_type"
+      ],
+      "title": "SearchDirective",
+      "type": "object"
+    },
+    "SearchFilters": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum Duration Ms"
+        },
+        "minimum_duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Duration Ms"
+        },
+        "minimum_height": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Height"
+        },
+        "minimum_width": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum Width"
+        },
+        "orientation": {
+          "anyOf": [
+            {
+              "enum": [
+                "landscape",
+                "portrait",
+                "square"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orientation"
+        }
+      },
+      "title": "SearchFilters",
+      "type": "object"
+    }
+  },
+  "$id": "https://yt-visuals.local/schemas/visual-review.v2.schema.json",
+  "additionalProperties": false,
+  "properties": {
+    "bookkeeping": {
+      "$ref": "#/$defs/ReviewBookkeeping"
+    },
+    "contract_version": {
+      "const": 2,
+      "title": "Contract Version",
+      "type": "integer"
+    },
+    "document_type": {
+      "const": "visual_review",
+      "title": "Document Type",
+      "type": "string"
+    },
+    "review_entries": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "blocked_beat_guidance": "#/$defs/CompletedBlockedGuidanceEntryV2",
+            "candidate_review": "#/$defs/CompletedCandidateReviewEntry"
+          },
+          "propertyName": "entry_type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/CompletedCandidateReviewEntry"
+          },
+          {
+            "$ref": "#/$defs/CompletedBlockedGuidanceEntryV2"
+          }
+        ]
+      },
+      "title": "Review Entries",
+      "type": "array"
+    },
+    "story": {
+      "$ref": "#/$defs/ReviewStory"
+    }
+  },
+  "required": [
+    "document_type",
+    "contract_version",
+    "bookkeeping",
+    "story",
+    "review_entries"
+  ],
+  "title": "VisualReviewDocumentV2",
+  "type": "object"
+}
