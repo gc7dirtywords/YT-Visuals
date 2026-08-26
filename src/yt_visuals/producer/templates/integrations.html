@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Integrations · YT-Visuals{% endblock %}
+{% block content %}
+  <section class="settings-header">
+    <p class="eyebrow">Settings</p>
+    <h1>Integrations</h1>
+    <p>Credentials stay in your environment or Windows Credential Manager—not in the catalog or project files.</p>
+  </section>
+
+  <section class="integration-card">
+    <div class="integration-title">
+      <div>
+        <h2>Pexels</h2>
+        <p>Import selected Pexels photo and video pages through the validated acquisition pipeline.</p>
+      </div>
+      <span class="status {{ 'configured' if pexels.configured else 'missing' }}">
+        {{ 'Configured' if pexels.configured else 'Not Configured' }}
+      </span>
+    </div>
+
+    {% if pexels.source == 'environment' %}
+      <p class="source-note">Active credential source: <strong>PEXELS_API_KEY environment override</strong>.</p>
+    {% elif pexels.source == 'keyring' %}
+      <p class="source-note">Active credential source: <strong>Windows Credential Manager</strong>.</p>
+    {% elif pexels.error %}
+      <p class="source-note error-text">{{ pexels.error }}</p>
+    {% else %}
+      <p class="source-note">No Pexels credential is currently available.</p>
+    {% endif %}
+
+    <form class="credential-form" method="post">
+      <label for="pexels-key">API key</label>
+      <input id="pexels-key" type="password" name="api_key" autocomplete="new-password" placeholder="Enter a new or replacement key">
+      <p class="field-help">Saved keys are never returned to this page. Leave this blank to test the active saved or environment credential.</p>
+      <div class="integration-actions">
+        <button formaction="{{ url_for('test_pexels') }}" type="submit">Test Connection</button>
+        <button class="primary" formaction="{{ url_for('save_pexels') }}" type="submit">Save</button>
+      </div>
+    </form>
+    <form action="{{ url_for('remove_pexels') }}" method="post" class="remove-form">
+      <button type="submit">Remove Stored Key</button>
+      <span>Environment overrides are not changed by this action.</span>
+    </form>
+  </section>
+{% endblock %}

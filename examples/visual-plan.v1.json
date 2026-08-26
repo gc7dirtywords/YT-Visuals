@@ -1,0 +1,43 @@
+{
+  "document_type": "visual_plan",
+  "contract_version": 1,
+  "story": {
+    "story_id": "example-fireplace-story",
+    "title": "The Fireplace"
+  },
+  "beats": [
+    {
+      "beat_id": "beat-001",
+      "sequence": 1,
+      "narration_context": "Three heavy knocks sounded from inside the wall.",
+      "desired_visual": "A dark old fireplace and the wall surrounding it",
+      "search_queries": [
+        "dark old fireplace interior",
+        "fireplace wall at night"
+      ],
+      "must_have": ["fireplace", "dark interior"],
+      "avoid": ["people posing", "bright modern room"],
+      "media_preference": "either",
+      "source_requirement": "representative",
+      "production_opportunities": [
+        {
+          "trigger": "three heavy knocks sound from inside the wall",
+          "sfx_suggestion": "Three restrained impact sounds",
+          "edit_suggestion": "Optional brief blackout on the final knock"
+        }
+      ]
+    },
+    {
+      "beat_id": "beat-002",
+      "sequence": 2,
+      "narration_context": "The room was empty when the lights came back.",
+      "desired_visual": "An empty dim room after the disturbance",
+      "search_queries": ["empty dim room night"],
+      "must_have": [],
+      "avoid": ["visible people"],
+      "media_preference": "image",
+      "source_requirement": "representative",
+      "production_opportunities": []
+    }
+  ]
+}

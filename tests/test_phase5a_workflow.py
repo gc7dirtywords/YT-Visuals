@@ -342,3 +342,12 @@ def test_either_results_merge_by_provider_position_with_image_tie_break() -> Non
     assert [(position, item.media_type, item.provider_asset_id) for position, item in merged] == [
         (1, "image", "7001"), (1, "video", "7002"), (2, "image", "7003"),
     ]
+
+
+def test_workflow_service_keeps_orm_provider_distinct_from_provider_protocol() -> None:
+    from yt_visuals import models
+    from yt_visuals.providers import base
+    from yt_visuals.workflow import service as workflow_service
+
+    assert workflow_service.MediaProvider is models.MediaProvider
+    assert workflow_service.ProviderClient is base.MediaProvider

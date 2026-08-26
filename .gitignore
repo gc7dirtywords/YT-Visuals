@@ -24,6 +24,9 @@ Library/Videos/*
 # Generated visual-review iteration artifacts; preserve other Projects content.
 Projects/*/visuals/*/iterations/
 
+# Producer-led DaVinci handoff folders are generated from catalog masters.
+Projects/*/Edit/
+
 # Prevent media copied into other folders from being committed accidentally.
 *.3gp
 *.avi

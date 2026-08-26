@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Visual Plans · YT-Visuals{% endblock %}
+{% block content %}
+  <section class="hero">
+    <p class="eyebrow">Producer-led sourcing</p>
+    <h1>Bring in a Visual Plan</h1>
+    <p>Import the beat-by-beat plan from your ChatGPT Project, then choose every visual yourself.</p>
+    <form class="import-form" action="{{ url_for('import_plan') }}" method="post" enctype="multipart/form-data">
+      <label for="visual-plan">Visual Plan JSON</label>
+      <input id="visual-plan" type="file" name="visual_plan" accept="application/json,.json" required>
+      <button class="primary" type="submit">Import Visual Plan</button>
+    </form>
+  </section>
+  {% if workspaces %}
+    <section>
+      <div class="section-heading"><h2>Production workspaces</h2></div>
+      <div class="workspace-grid">
+        {% for item in workspaces %}
+          <a class="workspace-tile" href="{{ url_for('workspace', workspace_id=item.workspace_id) }}">
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.story_id }}</span>
+            <span>{{ item.selected }} / {{ item.total }} beats selected</span>
+          </a>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+{% endblock %}

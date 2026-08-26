@@ -5,8 +5,61 @@ YouTube production. It includes the SQLite catalog, a recursive local-library sc
 basic catalog search, and a provider-neutral acquisition layer with Pexels as the first
 provider.
 
-The project does not yet support Pixabay, generate manifests, use AI services, automate
-DaVinci Resolve, or assemble video.
+The project does not yet support Pixabay, use AI services, automate DaVinci Resolve, or
+assemble video.
+
+## Producer-led Visual Plan workflow
+
+The primary production path is a local, producer-controlled workspace. A ChatGPT Project
+creates a strict Visual Plan v1 containing beat context and recommended manual searches;
+YT-Visuals validates and stores that plan without making AI calls or interpreting the
+narration. The producer explicitly chooses every asset.
+
+Start the local server-rendered interface:
+
+```powershell
+.\.venv\Scripts\yt-visuals.exe web
+```
+
+The command binds to `127.0.0.1` first, prints the ready URL, and then opens one browser
+tab. Use `--no-browser` to suppress automatic opening. An explicit `--host 0.0.0.0`
+allows LAN access and prints a security warning plus the likely LAN URL; the default
+remains loopback-only. If the browser cannot be launched, the server keeps running and
+prints the URL to open manually.
+
+Configure Pexels from **Settings → Integrations → Pexels**. A saved key is held by the
+operating-system keyring (Windows Credential Manager) under service `YT-Visuals` and
+username `PEXELS_API_KEY`; it is never returned to the browser. The environment variable
+`PEXELS_API_KEY` takes precedence over the saved key. Test Connection performs one
+minimal authenticated provider request, and Remove Stored Key removes only the keyring
+entry—it does not change an environment override.
+
+The home page imports a Visual Plan JSON file. Each story workspace shows one card per
+beat with narration, requested visual, guidance, copyable search phrases, up to three
+deterministic local-catalog candidates, current selection and provenance/license details.
+Nothing is auto-selected. A catalog result can be selected, hidden for only that beat,
+restored, or replaced later.
+
+Manual import supports HTTPS Pexels photo and video page URLs. The page identity is
+resolved through the Pexels API and the existing hardened acquisition pipeline; arbitrary
+web-page scraping and arbitrary direct-media downloads are intentionally unsupported.
+Local image/video uploads are validated with the existing media inspectors, SHA-256
+deduplicated, cataloged as local imports, and assigned no invented license.
+
+The workspace builds a DaVinci-ready folder at `Projects/<story_id>/Edit/`. Its `Visuals`
+folder contains only current selections in stable beat order, using same-filesystem hard
+links where possible and safe copies otherwise. `manifest.csv` records beat, asset,
+source, creator, and license context. Rebuilding never mutates Library masters. The
+producer storyboard is written to `Edit/storyboard.pdf` and clearly includes both
+selected and unselected beats without requiring an alignment score or automated review.
+
+The contract, JSON Schema, and example are:
+
+- `docs/17-visual-plan-v1.md`
+- `schemas/visual-plan.v1.schema.json`
+- `examples/visual-plan.v1.json`
+
+The Phase 4/5 Visual Request and review CLI remains available as a separate legacy path.
 
 ## Phase 4: manual visual-review workflow
 

@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}{{ workspace.title }} · YT-Visuals{% endblock %}
+{% block content %}
+  <section class="workspace-header">
+    <div>
+      <p class="eyebrow">{{ workspace.story_id }}</p>
+      <h1>{{ workspace.title }}</h1>
+      <p class="completion"><strong>{{ workspace.selected }} / {{ workspace.total }}</strong> beats selected</p>
+    </div>
+    <div class="workspace-actions">
+      <form action="{{ url_for('open_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Edit Folder</button></form>
+      <button type="button" data-copy="{{ workspace.edit_folder }}">Copy Edit Folder Path</button>
+      <form action="{{ url_for('rebuild_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Rebuild Edit Folder</button></form>
+      <form action="{{ url_for('generate_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button class="primary" type="submit">Generate Storyboard</button></form>
+    </div>
+  </section>
+
+  <div class="beats">
+    {% for beat in workspace.beats %}
+      {% set spec = beat.specification %}
+      <article class="beat-card" id="{{ beat.beat_id }}">
+        <header class="beat-heading">
+          <div><span class="sequence">{{ "%03d"|format(beat.sequence) }}</span><h2>{{ beat.beat_id }}</h2></div>
+          <div class="badges"><span>{{ spec.media_preference }}</span><span>{{ spec.source_requirement }}</span></div>
+        </header>
+        <div class="brief-grid">
+          <section><h3>Narration</h3><p>{{ spec.narration_context }}</p></section>
+          <section><h3>Desired visual</h3><p>{{ spec.desired_visual }}</p></section>
+          <section><h3>Must have</h3><p>{{ spec.must_have|join(' · ') if spec.must_have else 'None specified' }}</p></section>
+          <section><h3>Avoid</h3><p>{{ spec.avoid|join(' · ') if spec.avoid else 'None specified' }}</p></section>
+        </div>
+
+        {% if spec.production_opportunities %}
+          <section class="opportunities">
+            <h3>Optional action-specific production opportunities</h3>
+            {% for item in spec.production_opportunities %}
+              <p><strong>{{ item.trigger }}</strong>{% if item.sfx_suggestion %} · SFX: {{ item.sfx_suggestion }}{% endif %}{% if item.edit_suggestion %} · Edit: {{ item.edit_suggestion }}{% endif %}</p>
+            {% endfor %}
+          </section>
+        {% endif %}
+
+        <section class="queries">
+          <h3>Recommended searches</h3>
+          <div>{% for query in spec.search_queries %}<button type="button" class="query" data-copy="{{ query }}">{{ query }} <span>Copy</span></button>{% endfor %}</div>
+        </section>
+
+        <section class="selection-panel">
+          <h3>Current selection</h3>
+          {% if beat.selected %}
+            <div class="selected-asset">
+              {% if beat.selected.media_type == 'image' %}
+                <img src="{{ url_for('media', asset_id=beat.selected.asset_id) }}" alt="Selected visual for {{ beat.beat_id }}">
+              {% else %}
+                <video src="{{ url_for('media', asset_id=beat.selected.asset_id) }}" controls preload="metadata"></video>
+              {% endif %}
+              <div class="asset-copy">
+                <strong>Asset {{ beat.selected.asset_id }} · {{ beat.selected.media_type }}</strong>
+                <span>{{ beat.selected.source.provider or beat.selected.source.origin }}{% if beat.selected.source.creator_name %} · {{ beat.selected.source.creator_name }}{% endif %}</span>
+                <span>License: {{ beat.selected.license.name or 'UNKNOWN' }}</span>
+                {% if beat.selected.source.source_url %}<a href="{{ beat.selected.source.source_url }}" target="_blank" rel="noreferrer">Open source page</a>{% endif %}
+                <form action="{{ url_for('clear_selection', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><button type="submit">Change Selection</button></form>
+              </div>
+            </div>
+          {% else %}
+            <p class="empty-state">No media selected. Choose a local result or import your chosen media.</p>
+          {% endif %}
+        </section>
+
+        <section class="candidate-section">
+          <h3>Local catalog candidates</h3>
+          {% if beat.candidates %}
+            <div class="candidate-grid">
+              {% for candidate in beat.candidates %}
+                <div class="candidate">
+                  {% if candidate.media_type == 'image' %}<img src="{{ url_for('media', asset_id=candidate.asset_id) }}" alt="Local candidate {{ candidate.asset_id }}">{% else %}<video src="{{ url_for('media', asset_id=candidate.asset_id) }}" controls preload="metadata"></video>{% endif %}
+                  <div class="candidate-body">
+                    <strong>Asset {{ candidate.asset_id }} · {{ candidate.media_type }}</strong>
+                    <span>Used {{ candidate.usage_count }} time{% if candidate.usage_count != 1 %}s{% endif %}</span>
+                    <span>{{ candidate.source.provider or candidate.source.origin }} · License {{ candidate.license.name or 'UNKNOWN' }}</span>
+                    <div class="inline-actions">
+                      <form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button class="primary" type="submit">Use This</button></form>
+                      <form action="{{ url_for('hide_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button type="submit">Hide</button></form>
+                    </div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}<p class="empty-state">No matching local candidates.</p>{% endif %}
+          {% if beat.hidden_asset_ids %}
+            <details class="hidden-assets"><summary>{{ beat.hidden_asset_ids|length }} hidden for this beat</summary>{% for asset_id in beat.hidden_asset_ids %}<form action="{{ url_for('restore_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=asset_id) }}" method="post"><button type="submit">Restore asset {{ asset_id }}</button></form>{% endfor %}</details>
+          {% endif %}
+        </section>
+
+        <section class="manual-import">
+          <div>
+            <h3>Import a Pexels page</h3>
+            <form action="{{ url_for('import_pexels', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post">
+              <input type="url" name="source_url" placeholder="https://www.pexels.com/photo/...-12345/" required>
+              <button type="submit">Import &amp; Use</button>
+            </form>
+            <small>Only Pexels photo and video page URLs are supported; arbitrary page scraping is intentionally disabled.</small>
+          </div>
+          <div>
+            <h3>Upload a local file</h3>
+            <form action="{{ url_for('upload_media', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post" enctype="multipart/form-data">
+              <input type="file" name="media_file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,.mkv,.m4v" required>
+              <button type="submit">Upload &amp; Use</button>
+            </form>
+            <small>Uploads are validated, SHA-256 deduplicated, and cataloged without an invented license.</small>
+          </div>
+        </section>
+      </article>
+    {% endfor %}
+  </div>
+{% endblock %}

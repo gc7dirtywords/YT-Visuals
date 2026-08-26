@@ -1,0 +1,181 @@
+{
+  "$defs": {
+    "ProductionOpportunity": {
+      "additionalProperties": false,
+      "properties": {
+        "edit_suggestion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edit Suggestion"
+        },
+        "sfx_suggestion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sfx Suggestion"
+        },
+        "trigger": {
+          "minLength": 1,
+          "title": "Trigger",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trigger"
+      ],
+      "title": "ProductionOpportunity",
+      "type": "object"
+    },
+    "VisualPlanBeat": {
+      "additionalProperties": false,
+      "properties": {
+        "avoid": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Avoid",
+          "type": "array"
+        },
+        "beat_id": {
+          "title": "Beat Id",
+          "type": "string"
+        },
+        "desired_visual": {
+          "minLength": 1,
+          "title": "Desired Visual",
+          "type": "string"
+        },
+        "media_preference": {
+          "enum": [
+            "image",
+            "video",
+            "either"
+          ],
+          "title": "Media Preference",
+          "type": "string"
+        },
+        "must_have": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Must Have",
+          "type": "array"
+        },
+        "narration_context": {
+          "minLength": 1,
+          "title": "Narration Context",
+          "type": "string"
+        },
+        "production_opportunities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProductionOpportunity"
+          },
+          "title": "Production Opportunities",
+          "type": "array"
+        },
+        "search_queries": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Search Queries",
+          "type": "array"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "source_requirement": {
+          "enum": [
+            "representative",
+            "exact"
+          ],
+          "title": "Source Requirement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "beat_id",
+        "sequence",
+        "narration_context",
+        "desired_visual",
+        "search_queries",
+        "media_preference",
+        "source_requirement"
+      ],
+      "title": "VisualPlanBeat",
+      "type": "object"
+    },
+    "VisualPlanStory": {
+      "additionalProperties": false,
+      "properties": {
+        "story_id": {
+          "title": "Story Id",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "story_id",
+        "title"
+      ],
+      "title": "VisualPlanStory",
+      "type": "object"
+    }
+  },
+  "$id": "https://yt-visuals.local/schemas/visual-plan.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "beats": {
+      "items": {
+        "$ref": "#/$defs/VisualPlanBeat"
+      },
+      "minItems": 1,
+      "title": "Beats",
+      "type": "array"
+    },
+    "contract_version": {
+      "const": 1,
+      "title": "Contract Version",
+      "type": "integer"
+    },
+    "document_type": {
+      "const": "visual_plan",
+      "title": "Document Type",
+      "type": "string"
+    },
+    "story": {
+      "$ref": "#/$defs/VisualPlanStory"
+    }
+  },
+  "required": [
+    "document_type",
+    "contract_version",
+    "story",
+    "beats"
+  ],
+  "title": "Visual Plan v1",
+  "type": "object"
+}

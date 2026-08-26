@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .credentials import resolve_pexels_api_key
+
 
 DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES = 500 * 1024 * 1024
@@ -56,8 +58,7 @@ class Settings:
 
     @property
     def pexels_api_key(self) -> str | None:
-        value = os.environ.get("PEXELS_API_KEY", "").strip()
-        return value or None
+        return resolve_pexels_api_key()
 
     @property
     def max_image_download_bytes(self) -> int:

@@ -673,3 +673,83 @@ class AssetReviewAnnotation(TimestampMixin, Base):
         String(40), nullable=False, default="chatgpt_visual_review", server_default="chatgpt_visual_review"
     )
     annotations_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class ProducerWorkspace(TimestampMixin, Base):
+    __tablename__ = "producer_workspaces"
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'complete')", name="status"),
+        CheckConstraint("length(trim(story_external_id)) > 0", name="story_external_id_not_empty"),
+        CheckConstraint("length(trim(title)) > 0", name="title_not_empty"),
+        CheckConstraint("length(plan_document_sha256) = 64", name="plan_sha256_length"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    story_external_id: Mapped[str] = mapped_column(
+        String(128, collation="NOCASE"), nullable=False, unique=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    plan_document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+
+    beats: Mapped[list["ProducerBeat"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan", order_by="ProducerBeat.sequence"
+    )
+
+
+class ProducerBeat(TimestampMixin, Base):
+    __tablename__ = "producer_beats"
+    __table_args__ = (
+        CheckConstraint("sequence > 0", name="sequence_positive"),
+        CheckConstraint(
+            "selected_asset_sha256 IS NULL OR length(selected_asset_sha256) = 64",
+            name="selected_sha256_length",
+        ),
+        UniqueConstraint("workspace_id", "external_beat_id", name="uq_producer_beats_workspace_external"),
+        UniqueConstraint("workspace_id", "sequence", name="uq_producer_beats_workspace_sequence"),
+        Index("ix_producer_beats_workspace_sequence", "workspace_id", "sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("producer_workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    external_beat_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    specification_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    selected_asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT")
+    )
+    selected_asset_sha256: Mapped[str | None] = mapped_column(String(64))
+    selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    workspace: Mapped[ProducerWorkspace] = relationship(back_populates="beats")
+    selected_asset: Mapped[MediaAsset | None] = relationship()
+    hidden_assets: Mapped[list["ProducerBeatHiddenAsset"]] = relationship(
+        back_populates="beat", cascade="all, delete-orphan"
+    )
+
+
+class ProducerBeatHiddenAsset(TimestampMixin, Base):
+    __tablename__ = "producer_beat_hidden_assets"
+    __table_args__ = (
+        UniqueConstraint("beat_id", "asset_id", name="uq_producer_hidden_beat_asset"),
+        Index("ix_producer_hidden_beat", "beat_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    beat_id: Mapped[str] = mapped_column(
+        ForeignKey("producer_beats.id", ondelete="CASCADE"), nullable=False
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), nullable=False
+    )
+    hidden_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+    beat: Mapped[ProducerBeat] = relationship(back_populates="hidden_assets")
+    asset: Mapped[MediaAsset] = relationship()

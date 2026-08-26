@@ -51,7 +51,7 @@ from .contracts import (
 )
 from .provider_fallback import ProviderFallbackCoordinator
 from ..acquisition import AcquisitionService
-from ..providers.base import MediaProvider
+from ..providers.base import MediaProvider as ProviderClient
 from ..providers.registry import create_provider
 
 
@@ -129,7 +129,7 @@ class VisualWorkflowService:
         settings: Settings,
         engine: Engine,
         *,
-        provider_factory: Callable[[str, Settings], MediaProvider] = create_provider,
+        provider_factory: Callable[[str, Settings], ProviderClient] = create_provider,
         acquisition_factory: Callable[[Settings, Engine], AcquisitionService] = AcquisitionService,
     ) -> None:
         self.settings = settings

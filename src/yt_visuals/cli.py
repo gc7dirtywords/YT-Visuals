@@ -32,6 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("doctor", help="Verify directories, database, migrations, and media tools")
 
+    web = subparsers.add_parser("web", help="Run the local producer workspace UI")
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=8765)
+    web.add_argument(
+        "--no-browser",
+        "--no-open",
+        dest="no_browser",
+        action="store_true",
+        help="Do not open a browser automatically",
+    )
+
     database = subparsers.add_parser("db", help="Database maintenance")
     database_subparsers = database.add_subparsers(dest="database_command", required=True)
     database_subparsers.add_parser("upgrade", help="Create or migrate the catalog database")
@@ -125,6 +136,17 @@ def cli(
     settings = settings or Settings.load()
 
     try:
+        if args.command == "web":
+            from .producer.web import run_web_app
+
+            run_web_app(
+                settings,
+                host=args.host,
+                port=args.port,
+                open_browser=not args.no_browser,
+            )
+            return 0
+
         if args.command == "doctor":
             results = run_doctor(settings)
             for result in results:
