@@ -50,8 +50,11 @@ SENSITIVE_METADATA_KEYS = {
 PEXELS_DOWNLOAD_HOSTS = frozenset(
     {"images.pexels.com", "videos.pexels.com", "player.vimeo.com"}
 )
+YT_VISUALS_USER_AGENT = "YT-Visuals/0.1 (https://github.com/gc7dirtywords/YT-Visuals)"
 IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
-VIDEO_MIME_TYPES = frozenset({"video/mp4", "video/webm", "video/quicktime"})
+VIDEO_MIME_TYPES = frozenset(
+    {"video/mp4", "video/webm", "video/quicktime", "video/x-m4v", "video/x-matroska"}
+)
 PEXELS_POLICY_REVIEWED_AT = datetime(2026, 8, 25, tzinfo=timezone.utc)
 
 
@@ -219,7 +222,10 @@ class AcquisitionService:
             host.casefold() for host in (allowed_download_hosts or PEXELS_DOWNLOAD_HOSTS)
         )
         self._owns_client = http_client is None
-        self.http_client = http_client or httpx.Client(follow_redirects=True)
+        self.http_client = http_client or httpx.Client(
+            follow_redirects=True,
+            headers={"User-Agent": YT_VISUALS_USER_AGENT},
+        )
 
     def close(self) -> None:
         if self._owns_client:
@@ -1030,6 +1036,14 @@ class AcquisitionService:
             )
         )
         if existing is not None:
+            if not existing.source_url and result.source_url:
+                existing.source_url = result.source_url
+            if not existing.creator_name and result.creator_name:
+                existing.creator_name = result.creator_name
+            if not existing.creator_url and result.creator_url:
+                existing.creator_url = result.creator_url
+            if not existing.original_filename:
+                existing.original_filename = _original_filename(result.download_url)
             return False
         session.add(
             MediaSource(
@@ -1047,20 +1061,41 @@ class AcquisitionService:
 
     @staticmethod
     def _attach_license_if_missing(asset: MediaAsset, result: MediaSearchResult) -> None:
-        if asset.license is not None:
-            return
-        asset.license = AssetLicense(
-            license_name=result.license_name,
-            license_url=result.license_url,
-            attribution_required=result.attribution_required,
-            attribution_text=result.attribution_text,
-            usage_terms=result.license_notes,
-            commercial_use_allowed=result.commercial_use_allowed,
-            modifications_allowed=result.modifications_allowed,
-            verified_at=(
-                PEXELS_POLICY_REVIEWED_AT if result.provider.casefold() == "pexels" else None
-            ),
+        """Attach documentation without replacing stronger metadata already on an asset."""
+        reviewed_at = (
+            PEXELS_POLICY_REVIEWED_AT if result.provider.casefold() == "pexels" else None
         )
+        if asset.license is None:
+            asset.license = AssetLicense(
+                license_name=result.license_name or None,
+                license_url=result.license_url or None,
+                attribution_required=result.attribution_required,
+                attribution_text=result.attribution_text,
+                usage_terms=result.license_notes,
+                commercial_use_allowed=result.commercial_use_allowed,
+                modifications_allowed=result.modifications_allowed,
+                verified_at=reviewed_at,
+            )
+            return
+
+        license_record = asset.license
+        if not license_record.license_name and result.license_name:
+            license_record.license_name = result.license_name
+        if not license_record.license_url and result.license_url:
+            license_record.license_url = result.license_url
+        if not license_record.attribution_text and result.attribution_text:
+            license_record.attribution_text = result.attribution_text
+        if not license_record.usage_terms and result.license_notes:
+            license_record.usage_terms = result.license_notes
+        if license_record.commercial_use_allowed is None:
+            license_record.commercial_use_allowed = result.commercial_use_allowed
+        if license_record.modifications_allowed is None:
+            license_record.modifications_allowed = result.modifications_allowed
+        license_record.attribution_required = (
+            license_record.attribution_required or result.attribution_required
+        )
+        if license_record.verified_at is None and reviewed_at is not None:
+            license_record.verified_at = reviewed_at
 
     def _destination_path(self, result: MediaSearchResult, filename: str) -> Path:
         directory = self.settings.root / "Library" / (
@@ -1132,6 +1167,8 @@ def _extension_for(mime_type: str | None, url: str) -> str:
         "image/png": ".png",
         "image/webp": ".webp",
         "video/mp4": ".mp4",
+        "video/x-m4v": ".m4v",
+        "video/x-matroska": ".mkv",
         "video/webm": ".webm",
         "video/quicktime": ".mov",
     }

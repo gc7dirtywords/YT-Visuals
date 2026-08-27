@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import html
+import ipaddress
 import os
 import re
 import shutil
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
+import httpx
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from ..acquisition import AcquisitionService
+from ..acquisition import AcquisitionService, YT_VISUALS_USER_AGENT
 from ..config import Settings
 from ..library import LibraryScanner
 from ..library.inspection import (
@@ -31,6 +36,8 @@ from ..models import (
     ProducerWorkspace,
 )
 from ..providers.base import MediaProvider as ProviderClient
+from ..providers.base import MediaSearchResult
+from ..providers.errors import MediaDownloadError
 from ..providers.registry import create_provider
 from ..services import MediaCatalogService, SearchMediaRequest
 from ..services.schemas import AssetDetailResult, SearchCandidateResult
@@ -40,6 +47,7 @@ from .storyboard import render_producer_storyboard
 
 PEXELS_PAGE = re.compile(r"^/(photo|video)/(?:[^/]*-)?([0-9]+)/?$")
 SAFE_NAME = re.compile(r"[^a-z0-9]+")
+WIKIMEDIA_USER_AGENT = YT_VISUALS_USER_AGENT
 
 
 class ProducerWorkflowError(RuntimeError):
@@ -50,6 +58,18 @@ ProviderFactory = Callable[[str, Settings], ProviderClient]
 AcquisitionFactory = Callable[[Settings, Engine], AcquisitionService]
 
 
+@dataclass(frozen=True, slots=True)
+class WikimediaFileMetadata:
+    direct_media_url: str
+    source_page_url: str
+    creator_attribution: str | None
+    license_name: str | None
+    license_url: str | None
+
+
+WikimediaResolver = Callable[[str], WikimediaFileMetadata]
+
+
 class ProducerWorkflowService:
     def __init__(
         self,
@@ -58,12 +78,14 @@ class ProducerWorkflowService:
         *,
         provider_factory: ProviderFactory = create_provider,
         acquisition_factory: AcquisitionFactory = AcquisitionService,
+        wikimedia_resolver: WikimediaResolver | None = None,
     ) -> None:
         self.settings = settings
         self.engine = engine
         self.catalog = MediaCatalogService(engine)
         self.provider_factory = provider_factory
         self.acquisition_factory = acquisition_factory
+        self.wikimedia_resolver = wikimedia_resolver or resolve_wikimedia_file_page
 
     @staticmethod
     def validate_plan_file(path: Path) -> VisualPlan:
@@ -173,6 +195,7 @@ class ProducerWorkflowService:
                 "title": workspace.title,
                 "status": workspace.status,
                 "edit_folder": str(self.edit_folder(workspace.story_external_id)),
+                "storyboard": self._storyboard_view(workspace.story_external_id),
                 "selected": sum(1 for row in rows if row["selected_asset_id"]),
                 "total": len(rows),
                 "beats": rows,
@@ -427,6 +450,104 @@ class ProducerWorkflowService:
             "source_kind": "local_upload",
         }
 
+    def import_external_media(
+        self,
+        workspace_id: str,
+        beat_id: str,
+        direct_media_url: str,
+        *,
+        source_page_url: str | None = None,
+        creator_attribution: str | None = None,
+        license_name: str | None = None,
+        license_url: str | None = None,
+    ) -> dict[str, Any]:
+        resolved = (
+            self.wikimedia_resolver(direct_media_url)
+            if _is_wikimedia_file_page(direct_media_url)
+            else None
+        )
+        direct_url = _validated_https_url(
+            resolved.direct_media_url if resolved else direct_media_url,
+            field="Direct media URL",
+            required=True,
+        )
+        source_url = _validated_https_url(
+            source_page_url or (resolved.source_page_url if resolved else None),
+            field="Source page URL",
+        )
+        normalized_license_url = _validated_https_url(
+            license_url or (resolved.license_url if resolved else None),
+            field="License URL",
+        )
+        parsed = urlsplit(direct_url)
+        extension = Path(parsed.path).suffix.casefold()
+        if extension in IMAGE_EXTENSIONS:
+            media_type = "image"
+        elif extension in VIDEO_EXTENSIONS:
+            media_type = "video"
+        elif extension in {".gif", ".svg"}:
+            raise ProducerWorkflowError(
+                "Unsupported media URL type. GIF and SVG are not supported."
+            )
+        else:
+            raise ProducerWorkflowError(
+                "This URL did not resolve to a supported media file. "
+                "Provide the direct image/video URL."
+            )
+        self._ensure_preference(workspace_id, beat_id, media_type)
+
+        creator = (creator_attribution or (resolved.creator_attribution if resolved else "") or "").strip() or None
+        supplied_license_name = (license_name or (resolved.license_name if resolved else "") or "").strip()
+        result = MediaSearchResult(
+            provider="manual_external",
+            provider_asset_id=hashlib.sha256(direct_url.encode("utf-8")).hexdigest(),
+            media_type=media_type,
+            title=Path(parsed.path).stem[:255] or "Manual external media",
+            description="Manually supplied direct media URL",
+            creator_name=creator,
+            creator_url=None,
+            source_url=source_url or direct_url,
+            download_url=direct_url,
+            preview_url=None,
+            width=None,
+            height=None,
+            duration_ms=None,
+            mime_type=None,
+            license_name=supplied_license_name,
+            license_url=normalized_license_url or (resolved.license_url if resolved else "") or "",
+            attribution_required=False,
+            attribution_text=creator,
+            raw_metadata={"source_kind": "manual_external"},
+            commercial_use_allowed=None,
+            modifications_allowed=None,
+            license_notes=None,
+        )
+        acquisition = self.acquisition_factory(self.settings, self.engine)
+        acquisition.allowed_download_hosts = frozenset({parsed.hostname or ""})
+        try:
+            outcome = acquisition.acquire(result)
+        except MediaDownloadError as exc:
+            if getattr(exc, "category", None) in {
+                "mime_mismatch",
+                "invalid_image",
+                "invalid_video",
+            }:
+                raise ProducerWorkflowError(
+                    "This URL did not resolve to a supported media file. "
+                    "Provide the direct image/video URL."
+                ) from exc
+            raise ProducerWorkflowError(str(exc)) from exc
+        finally:
+            acquisition.close()
+        self.select_asset(workspace_id, beat_id, outcome.asset_id)
+        return {
+            **outcome.to_dict(),
+            "source_kind": "manual_external",
+            "media_type": media_type,
+            "source_page_url": source_url,
+            "direct_media_url": direct_url,
+        }
+
     def build_edit_folder(
         self,
         workspace_id: str,
@@ -512,6 +633,28 @@ class ProducerWorkflowService:
         pages = render_producer_storyboard(workspace, destination, root=self.settings.root)
         return {"storyboard_path": str(destination), "pages": pages}
 
+    def storyboard_path(self, workspace_id: str) -> Path:
+        workspace = self.get_workspace(workspace_id, include_candidates=False)
+        path = self.edit_folder(workspace["story_id"]) / "storyboard.pdf"
+        _assert_within(path, self.settings.root / "Projects")
+        if not path.is_file():
+            raise ProducerWorkflowError("generate the storyboard before opening it")
+        return path
+
+    def open_storyboard(
+        self, workspace_id: str, *, opener: Callable[[str], Any] | None = None
+    ) -> str:
+        path = self.storyboard_path(workspace_id)
+        self._open_trusted_path(path, opener=opener, kind="storyboard")
+        return str(path)
+
+    def open_storyboard_folder(
+        self, workspace_id: str, *, opener: Callable[[str], Any] | None = None
+    ) -> str:
+        path = self.storyboard_path(workspace_id).parent
+        self._open_trusted_path(path, opener=opener, kind="storyboard folder")
+        return str(path)
+
     def edit_folder(self, story_id: str) -> Path:
         return self.settings.root / "Projects" / story_id / "Edit"
 
@@ -528,6 +671,23 @@ class ProducerWorkflowService:
         else:
             raise ProducerWorkflowError("opening folders is supported only on local Windows")
         return str(path)
+
+    @staticmethod
+    def _open_trusted_path(
+        path: Path,
+        *,
+        opener: Callable[[str], Any] | None,
+        kind: str,
+    ) -> None:
+        try:
+            if opener is not None:
+                opener(str(path))
+            elif hasattr(os, "startfile"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            else:
+                raise OSError("local OS opener is unavailable")
+        except OSError as exc:
+            raise ProducerWorkflowError(f"the {kind} could not be opened") from exc
 
     def asset_path(self, asset_id: int) -> Path:
         detail = self.catalog.get_asset_detail(asset_id)
@@ -548,6 +708,10 @@ class ProducerWorkflowService:
             raise ProducerWorkflowError(
                 f"this beat requires {preference} media, not {media_type}"
             )
+
+    def beat_anchor(self, workspace_id: str, beat_id: str) -> str:
+        beat, _hidden = self._load_beat(workspace_id, beat_id)
+        return beat.external_beat_id
 
     def _load_beat(
         self, workspace_id: str, beat_id: str
@@ -597,8 +761,8 @@ class ProducerWorkflowService:
 
     @staticmethod
     def _asset_view(detail: AssetDetailResult) -> dict[str, Any]:
-        source = detail.sources[0] if detail.sources else None
         license_record = detail.license
+        source = _preferred_source(detail, license_record)
         origin = "local_upload" if any(
             item.provenance_type == "local_import" for item in detail.locations
         ) else "provider_download"
@@ -632,6 +796,13 @@ class ProducerWorkflowService:
             },
         }
 
+    def _storyboard_view(self, story_id: str) -> dict[str, Any]:
+        path = self.edit_folder(story_id) / "storyboard.pdf"
+        return {
+            "exists": path.is_file(),
+            "path": str(path),
+        }
+
 
 def parse_pexels_page_url(value: str) -> tuple[str, str]:
     parsed = urlsplit(value.strip())
@@ -645,6 +816,133 @@ def parse_pexels_page_url(value: str) -> tuple[str, str]:
         raise ProducerWorkflowError("the URL is not a recognized Pexels photo or video page")
     kind, asset_id = match.groups()
     return ("image" if kind == "photo" else "video"), asset_id
+
+
+def _validated_https_url(
+    value: str | None, *, field: str, required: bool = False
+) -> str | None:
+    normalized = (value or "").strip()
+    if not normalized:
+        if required:
+            raise ProducerWorkflowError(f"{field} is required")
+        return None
+    parsed = urlsplit(normalized)
+    host = (parsed.hostname or "").casefold()
+    if parsed.scheme.casefold() != "https" or not host or parsed.username or parsed.password:
+        raise ProducerWorkflowError(f"{field} must be a valid HTTPS URL")
+    if host == "localhost" or host.endswith(".localhost"):
+        raise ProducerWorkflowError(f"{field} must use a public HTTPS host")
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        raise ProducerWorkflowError(f"{field} must use a public HTTPS host")
+    return normalized
+
+
+def _preferred_source(detail: AssetDetailResult, license_record: Any):
+    """Choose the most useful documented source without discarding other provenance."""
+    if not detail.sources:
+        return None
+    license_known = bool(license_record and license_record.license_name)
+
+    def priority(source: Any) -> tuple[int, int, int, int, str]:
+        documented_page = int(bool(source.source_url))
+        documented_creator = int(bool(source.creator_name))
+        provider_backed = int(bool(source.provider))
+        licensed_page = int(license_known and documented_page)
+        acquired = source.acquired_at.isoformat() if source.acquired_at else ""
+        return (licensed_page, documented_page, documented_creator, provider_backed, acquired)
+
+    return max(detail.sources, key=priority)
+
+
+def _is_wikimedia_file_page(value: str) -> bool:
+    parsed = urlsplit(value.strip())
+    if (parsed.hostname or "").casefold() != "commons.wikimedia.org":
+        return False
+    title = parse_qs(parsed.query).get("title", [""])[0]
+    return parsed.path.casefold().startswith("/wiki/file:") or title.casefold().startswith("file:")
+
+
+def resolve_wikimedia_file_page(
+    value: str, *, http_client: httpx.Client | None = None
+) -> WikimediaFileMetadata:
+    page_url = _validated_https_url(value, field="Wikimedia Commons file page", required=True)
+    parsed = urlsplit(page_url)
+    if (parsed.hostname or "").casefold() != "commons.wikimedia.org":
+        raise ProducerWorkflowError("only Wikimedia Commons file pages are supported")
+    title = ""
+    if parsed.path.casefold().startswith("/wiki/file:"):
+        title = unquote(parsed.path[len("/wiki/") :])
+    elif parsed.path.casefold() == "/w/index.php":
+        title = parse_qs(parsed.query).get("title", [""])[0]
+    if not title.casefold().startswith("file:"):
+        raise ProducerWorkflowError("the Wikimedia Commons URL is not a file page")
+
+    try:
+        client = http_client or httpx.Client(
+            timeout=20.0,
+            follow_redirects=True,
+            headers={"User-Agent": WIKIMEDIA_USER_AGENT},
+        )
+        response = client.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query",
+                "format": "json",
+                "formatversion": "2",
+                "prop": "imageinfo",
+                "iiprop": "url|extmetadata",
+                "titles": title,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise ProducerWorkflowError("Wikimedia Commons could not resolve that file page") from exc
+    finally:
+        if http_client is None and "client" in locals():
+            client.close()
+
+    try:
+        page = payload["query"]["pages"][0]
+        info = page["imageinfo"][0]
+        direct_media_url = info["url"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ProducerWorkflowError("Wikimedia Commons returned no original media file") from exc
+    if not isinstance(direct_media_url, str):
+        raise ProducerWorkflowError("Wikimedia Commons returned an invalid media URL")
+
+    metadata = info.get("extmetadata") if isinstance(info, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    creator = _wikimedia_metadata_text(metadata, "Artist", "Author", "Credit")
+    license_name = _wikimedia_metadata_text(metadata, "LicenseShortName", "License")
+    license_url = _wikimedia_metadata_text(metadata, "LicenseUrl")
+    source_page_url = info.get("descriptionurl") if isinstance(info, dict) else None
+    if not isinstance(source_page_url, str):
+        source_page_url = page_url
+    return WikimediaFileMetadata(
+        direct_media_url=direct_media_url,
+        source_page_url=source_page_url,
+        creator_attribution=creator,
+        license_name=license_name,
+        license_url=license_url,
+    )
+
+
+def _wikimedia_metadata_text(metadata: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        item = metadata.get(key)
+        value = item.get("value") if isinstance(item, dict) else item
+        if not isinstance(value, str):
+            continue
+        text = html.unescape(re.sub(r"<[^>]*>", " ", value))
+        text = " ".join(text.split())
+        if text:
+            return text
+    return None
 
 
 def _safe_label(value: str, *, fallback: str) -> str:

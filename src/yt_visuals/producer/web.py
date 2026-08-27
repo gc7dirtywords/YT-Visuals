@@ -30,6 +30,7 @@ def create_app(
     service: ProducerWorkflowService | None = None,
     credential_store: CredentialStore | None = None,
     pexels_tester: Callable[[str], None] | None = None,
+    path_opener: Callable[[str], Any] | None = None,
 ) -> Flask:
     settings = settings or Settings.load()
     owned_engine = engine is None
@@ -120,38 +121,62 @@ def create_app(
     @app.get("/stories/<workspace_id>")
     def workspace(workspace_id: str) -> str:
         return render_template(
-            "workspace.html", workspace=service.get_workspace(workspace_id)
+            "workspace.html",
+            workspace=service.get_workspace(workspace_id),
+            focused_beat=request.args.get("focus"),
+            open_panel=request.args.get("panel"),
         )
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/select/<int:asset_id>")
     def select_asset(workspace_id: str, beat_id: str, asset_id: int):
         service.select_asset(workspace_id, beat_id, asset_id)
         flash("Asset selected for this beat.", "success")
-        return redirect(url_for("workspace", workspace_id=workspace_id))
+        return _beat_redirect(service, workspace_id, beat_id, panel="local")
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/clear")
     def clear_selection(workspace_id: str, beat_id: str):
         service.clear_selection(workspace_id, beat_id)
         flash("Beat selection cleared.", "success")
-        return redirect(url_for("workspace", workspace_id=workspace_id))
+        return _beat_redirect(service, workspace_id, beat_id)
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/hide/<int:asset_id>")
     def hide_asset(workspace_id: str, beat_id: str, asset_id: int):
         service.hide_asset(workspace_id, beat_id, asset_id)
         flash("Asset hidden for this beat only.", "success")
-        return redirect(url_for("workspace", workspace_id=workspace_id))
+        return _beat_redirect(service, workspace_id, beat_id, panel="local")
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/restore/<int:asset_id>")
     def restore_asset(workspace_id: str, beat_id: str, asset_id: int):
         service.restore_asset(workspace_id, beat_id, asset_id)
         flash("Hidden asset restored for this beat.", "success")
-        return redirect(url_for("workspace", workspace_id=workspace_id))
+        return _beat_redirect(service, workspace_id, beat_id, panel="local")
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/pexels")
     def import_pexels(workspace_id: str, beat_id: str):
         service.import_pexels_page(workspace_id, beat_id, request.form.get("source_url", ""))
         flash("Pexels media acquired and selected.", "success")
-        return redirect(url_for("workspace", workspace_id=workspace_id))
+        return _beat_redirect(service, workspace_id, beat_id, panel="pexels")
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/external")
+    def import_external(workspace_id: str, beat_id: str):
+        try:
+            service.import_external_media(
+                workspace_id,
+                beat_id,
+                request.form.get("direct_media_url", ""),
+                source_page_url=request.form.get("source_page_url"),
+                creator_attribution=request.form.get("creator_attribution"),
+                license_name=request.form.get("license_name"),
+                license_url=request.form.get("license_url"),
+            )
+        except (ProducerWorkflowError, ProviderError):
+            raise
+        except Exception as exc:
+            raise ProducerWorkflowError(
+                "External import could not be completed. Check the supplied media URL and try again."
+            ) from exc
+        flash("External media validated, cataloged, and selected.", "success")
+        return _beat_redirect(service, workspace_id, beat_id, panel="external")
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/upload")
     def upload_media(workspace_id: str, beat_id: str):
@@ -170,7 +195,7 @@ def create_app(
         finally:
             temporary_path.unlink(missing_ok=True)
         flash("Uploaded media validated, cataloged, and selected.", "success")
-        return redirect(url_for("workspace", workspace_id=workspace_id))
+        return _beat_redirect(service, workspace_id, beat_id, panel="local")
 
     @app.post("/stories/<workspace_id>/edit/rebuild")
     def rebuild_edit(workspace_id: str):
@@ -190,6 +215,27 @@ def create_app(
         flash(f"Storyboard generated ({result['pages']} pages).", "success")
         return redirect(url_for("workspace", workspace_id=workspace_id))
 
+    @app.post("/stories/<workspace_id>/storyboard/open")
+    def open_storyboard(workspace_id: str):
+        service.open_storyboard(workspace_id, opener=path_opener)
+        flash("Storyboard opened.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
+
+    @app.post("/stories/<workspace_id>/storyboard/folder")
+    def open_storyboard_folder(workspace_id: str):
+        service.open_storyboard_folder(workspace_id, opener=path_opener)
+        flash("Storyboard folder opened.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
+
+    @app.get("/stories/<workspace_id>/storyboard/view")
+    def view_storyboard(workspace_id: str):
+        return send_file(
+            service.storyboard_path(workspace_id),
+            mimetype="application/pdf",
+            as_attachment=False,
+            conditional=True,
+        )
+
     @app.get("/media/<int:asset_id>")
     def media(asset_id: int):
         return send_file(service.asset_path(asset_id), conditional=True)
@@ -197,13 +243,13 @@ def create_app(
     @app.errorhandler(ProducerWorkflowError)
     def producer_error(error: ProducerWorkflowError):
         flash(str(error), "error")
-        target = request.referrer or url_for("index")
+        target = _error_target(service)
         return redirect(target)
 
     @app.errorhandler(ProviderError)
     def provider_error(error: ProviderError):
         flash(str(error), "error")
-        target = request.referrer or url_for("index")
+        target = _error_target(service)
         return redirect(target)
 
     @app.errorhandler(CredentialStoreError)
@@ -212,6 +258,58 @@ def create_app(
         return redirect(url_for("integrations"))
 
     return app
+
+
+def _beat_redirect(
+    service: ProducerWorkflowService,
+    workspace_id: str,
+    beat_id: str,
+    *,
+    panel: str | None = None,
+):
+    return redirect(_beat_location(service, workspace_id, beat_id, panel=panel))
+
+
+def _beat_location(
+    service: ProducerWorkflowService,
+    workspace_id: str,
+    beat_id: str,
+    *,
+    panel: str | None = None,
+) -> str:
+    anchor = service.beat_anchor(workspace_id, beat_id)
+    return url_for(
+        "workspace",
+        workspace_id=workspace_id,
+        focus=anchor,
+        panel=panel,
+        _anchor=anchor,
+    )
+
+
+def _error_target(service: ProducerWorkflowService) -> str:
+    values = request.view_args or {}
+    workspace_id = values.get("workspace_id")
+    beat_id = values.get("beat_id")
+    if isinstance(workspace_id, str) and isinstance(beat_id, str):
+        try:
+            panels = {
+                "import_pexels": "pexels",
+                "import_external": "external",
+                "upload_media": "local",
+                "select_asset": "local",
+                "hide_asset": "local",
+                "restore_asset": "local",
+            }
+            return _beat_location(
+                service,
+                workspace_id,
+                beat_id,
+                panel=panels.get(request.endpoint or ""),
+            )
+        except ProducerWorkflowError:
+            pass
+    return request.referrer or url_for("index")
 
 
 def run_web_app(

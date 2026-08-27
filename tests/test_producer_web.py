@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import csv
 import io
+import re
+from pathlib import Path
 
+import httpx
 from PIL import Image
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
+from yt_visuals.acquisition import AcquisitionService
 from yt_visuals.config import Settings
 from yt_visuals.credentials import CredentialStore, PEXELS_CREDENTIAL_NAME, SERVICE_NAME
 from yt_visuals.database import initialize_database
+from yt_visuals.models import MediaAsset, MediaDownload, MediaSource, ProducerBeat
 from yt_visuals.providers.errors import ProviderAuthenticationError, ProviderConnectionError
 from yt_visuals.producer.web import create_app
+from yt_visuals.producer.service import (
+    ProducerWorkflowError,
+    ProducerWorkflowService,
+    WIKIMEDIA_USER_AGENT,
+    resolve_wikimedia_file_page,
+)
 
 
 class FakeKeyring:
@@ -75,6 +89,7 @@ def test_web_plan_import_workspace_and_upload_selection(catalog_settings: Settin
     assert b"Uploaded media validated" in uploaded.data
     assert b"Current selection" in uploaded.data
     assert b"License: UNKNOWN" in uploaded.data
+    assert b'class="selected" data-beat-link="beat-001"' in uploaded.data
     assert client.get("/static/producer.css").status_code == 200
     engine.dispose()
 
@@ -212,4 +227,331 @@ def test_remove_only_keyring_and_reports_environment_override(
     assert backend.value is None
     assert b"remains configured through the environment override" in response.data
     assert b"environment-secret" not in response.data
+    engine.dispose()
+
+
+def _workspace_client(catalog_settings: Settings, **app_kwargs):
+    engine = initialize_database(catalog_settings)
+    app = create_app(catalog_settings, engine=engine, **app_kwargs)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    client.post(
+        "/plans",
+        data={"visual_plan": (io.BytesIO(_plan_bytes()), "plan.json")},
+        content_type="multipart/form-data",
+    )
+    service = app.extensions["producer_service"]
+    workspace = service.list_workspaces()[0]
+    beat = service.get_workspace(
+        workspace["workspace_id"], include_candidates=False
+    )["beats"][0]
+    return engine, app, client, service, workspace, beat
+
+
+def test_beat_actions_redirect_to_stable_anchor(catalog_settings: Settings, monkeypatch) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    workspace_id = workspace["workspace_id"]
+    beat_id = beat["id"]
+    monkeypatch.setattr(service, "select_asset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "clear_selection", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "hide_asset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "restore_asset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "import_pexels_page", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "import_external_media", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "import_upload", lambda *args, **kwargs: None)
+
+    requests = [
+        (f"/stories/{workspace_id}/beats/{beat_id}/select/91", {}),
+        (f"/stories/{workspace_id}/beats/{beat_id}/clear", {}),
+        (f"/stories/{workspace_id}/beats/{beat_id}/hide/91", {}),
+        (f"/stories/{workspace_id}/beats/{beat_id}/restore/91", {}),
+        (f"/stories/{workspace_id}/beats/{beat_id}/pexels", {"source_url": "x"}),
+        (
+            f"/stories/{workspace_id}/beats/{beat_id}/external",
+            {"direct_media_url": "x"},
+        ),
+    ]
+    for path, data in requests:
+        response = client.post(path, data=data)
+        assert response.status_code == 302
+        assert response.headers["Location"].endswith("#beat-001")
+        assert "focus=beat-001" in response.headers["Location"]
+
+    upload = client.post(
+        f"/stories/{workspace_id}/beats/{beat_id}/upload",
+        data={"media_file": (_jpeg(), "chosen.jpg")},
+        content_type="multipart/form-data",
+    )
+    assert upload.headers["Location"].endswith("#beat-001")
+    assert "panel=local" in upload.headers["Location"]
+
+    def fail_external(*args, **kwargs):
+        raise ProducerWorkflowError("unsupported external media")
+
+    monkeypatch.setattr(service, "import_external_media", fail_external)
+    failed = client.post(
+        f"/stories/{workspace_id}/beats/{beat_id}/external",
+        data={"direct_media_url": "https://example.test/page.html"},
+    )
+    assert failed.headers["Location"].endswith("#beat-001")
+    assert "panel=external" in failed.headers["Location"]
+    engine.dispose()
+
+
+def test_workspace_renders_sticky_progress_navigation_and_external_import(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, _service, workspace, _beat = _workspace_client(catalog_settings)
+
+    response = client.get(f"/stories/{workspace['workspace_id']}")
+
+    assert b'class="production-toolbar"' in response.data
+    assert b'class="toolbar-progress"><b>0 / 1</b> SELECTED' in response.data
+    assert b"Storyboard pending" in response.data
+    assert b'class="beat-navigator"' in response.data
+    assert b'href="#beat-001"' in response.data
+    assert b'class="unselected" data-beat-link="beat-001"' in response.data
+    assert b'id="beat-001" data-beat-card' in response.data
+    assert b"External / Other Source" in response.data
+    assert b"Local Library / Upload" in response.data
+    assert b"<summary>Pexels</summary>" in response.data
+    assert b'<details class="sourcing-panel local" >' in response.data
+    assert b'<details class="sourcing-panel pexels" >' in response.data
+    assert b'<details class="sourcing-panel external" >' in response.data
+    assert b'name="direct_media_url"' in response.data
+    assert b'name="source_page_url"' in response.data
+    assert b"IntersectionObserver" in client.get("/static/producer.js").data
+    assert b"global-actions" in response.data
+    assert b"Open Edit Folder" in response.data
+    assert b"Copy Edit Folder Path" in response.data
+    engine.dispose()
+
+
+def test_rendered_external_form_drives_full_wikimedia_import_and_persistence(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    file_page = "https://commons.wikimedia.org/wiki/File:Rendered_form.jpg"
+    direct_url = "https://upload.wikimedia.org/wikipedia/commons/a/a1/Rendered_form.jpg"
+    media_bytes = _jpeg().read()
+    requests: list[tuple[str, str]] = []
+
+    def external_http(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.host, request.url.path))
+        if request.url.host == "commons.wikimedia.org":
+            assert request.headers["User-Agent"] == WIKIMEDIA_USER_AGENT
+            return httpx.Response(
+                200,
+                json={
+                    "query": {
+                        "pages": [
+                            {
+                                "imageinfo": [
+                                    {
+                                        "url": direct_url,
+                                        "descriptionurl": file_page,
+                                        "extmetadata": {
+                                            "Artist": {"value": "<b>Archive Author</b>"},
+                                            "LicenseShortName": {"value": "CC0 1.0"},
+                                            "LicenseUrl": {
+                                                "value": "https://creativecommons.org/publicdomain/zero/1.0/"
+                                            },
+                                        },
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+            )
+        if request.url.host == "upload.wikimedia.org":
+            return httpx.Response(
+                200, headers={"Content-Type": "image/jpeg"}, content=media_bytes
+            )
+        raise AssertionError(f"unexpected external request host: {request.url.host}")
+
+    boundary_client = httpx.Client(
+        transport=httpx.MockTransport(external_http),
+        follow_redirects=True,
+        headers={"User-Agent": WIKIMEDIA_USER_AGENT},
+    )
+    service.wikimedia_resolver = lambda page: resolve_wikimedia_file_page(
+        page, http_client=boundary_client
+    )
+    service.acquisition_factory = lambda settings, supplied: AcquisitionService(
+        settings, supplied, http_client=boundary_client
+    )
+
+    rendered = client.get(f"/stories/{workspace['workspace_id']}")
+    form_match = re.search(
+        rb'<form action="([^"]+/external)" method="([^"]+)">(.*?)</form>',
+        rendered.data,
+        re.DOTALL,
+    )
+    assert form_match is not None
+    action = form_match.group(1).decode()
+    assert form_match.group(2) == b"post"
+    rendered_names = {
+        name.decode()
+        for name in re.findall(rb'name="([^"]+)"', form_match.group(3))
+    }
+    assert rendered_names == {
+        "direct_media_url",
+        "source_page_url",
+        "creator_attribution",
+        "license_name",
+        "license_url",
+    }
+
+    form_data = {name: "" for name in rendered_names}
+    form_data["direct_media_url"] = file_page
+    posted = client.post(action, data=form_data)
+    assert posted.status_code == 302
+    assert "panel=external" in posted.headers["Location"]
+
+    detail = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    selected = detail["beats"][0]["selected"]
+    assert selected is not None, client.get(posted.headers["Location"]).data.decode()
+    assert selected["source"]["source_url"] == file_page
+    assert selected["source"]["creator_name"] == "Archive Author"
+    assert selected["license"]["name"] == "CC0 1.0"
+    assert client.get(f"/media/{selected['asset_id']}").status_code == 200
+    refreshed = client.get(posted.headers["Location"])
+    assert b"Current selection" in refreshed.data
+    assert b"Archive Author" in refreshed.data
+    restarted_service = ProducerWorkflowService(catalog_settings, engine)
+    restarted = restarted_service.get_workspace(
+        workspace["workspace_id"], include_candidates=False
+    )
+    assert restarted["beats"][0]["selected"]["asset_id"] == selected["asset_id"]
+
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 1
+        assert session.scalar(select(func.count()).select_from(MediaSource)) == 1
+        assert session.scalar(select(func.count()).select_from(MediaDownload)) == 1
+        persisted = session.get(ProducerBeat, beat["id"])
+        assert persisted is not None and persisted.selected_asset_id == selected["asset_id"]
+
+    storyboard = service.generate_storyboard(workspace["workspace_id"])
+    assert Path(storyboard["storyboard_path"]).is_file()
+    built = service.build_edit_folder(workspace["workspace_id"])
+    with Path(built["edit_folder"]).joinpath("manifest.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as handle:
+        manifest = list(csv.DictReader(handle))
+    assert len(manifest) == 1
+    assert manifest[0]["source_url"] == file_page
+    assert len(list(Path(built["edit_folder"]).joinpath("Visuals").iterdir())) == 1
+    assert requests == [
+        ("commons.wikimedia.org", "/w/api.php"),
+        ("upload.wikimedia.org", "/wikipedia/commons/a/a1/Rendered_form.jpg"),
+    ]
+    boundary_client.close()
+    engine.dispose()
+
+
+def test_external_import_feedback_keeps_target_beat_and_panel_open(
+    catalog_settings: Settings, monkeypatch
+) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    monkeypatch.setattr(service, "import_external_media", lambda *args, **kwargs: {"asset_id": 1})
+
+    success = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/external",
+        data={"direct_media_url": "https://example.test/media.jpg"},
+        follow_redirects=True,
+    )
+    assert b"External media validated, cataloged, and selected." in success.data
+    assert b'<details class="sourcing-panel external" open>' in success.data
+    assert b'<details class="beat-disclosure" open>' in success.data
+
+    def fail(*args, **kwargs):
+        raise ProducerWorkflowError("This URL did not resolve to a supported media file.")
+
+    monkeypatch.setattr(service, "import_external_media", fail)
+    failure = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/external",
+        data={"direct_media_url": "https://example.test/page.html"},
+        follow_redirects=True,
+    )
+    assert b"did not resolve to a supported media file" in failure.data
+    assert b'<details class="sourcing-panel external" open>' in failure.data
+    assert b'<details class="beat-disclosure" open>' in failure.data
+    engine.dispose()
+
+
+def test_completed_beats_default_collapsed_and_focus_expands(catalog_settings: Settings) -> None:
+    engine, _app, client, _service, workspace, beat = _workspace_client(catalog_settings)
+    client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/upload",
+        data={"media_file": (_jpeg(), "complete.jpg")},
+        content_type="multipart/form-data",
+    )
+
+    collapsed = client.get(f"/stories/{workspace['workspace_id']}")
+    focused = client.get(
+        f"/stories/{workspace['workspace_id']}?focus=beat-001&panel=external#beat-001"
+    )
+    assert b'beat-card completed' in collapsed.data
+    assert b'<details class="beat-disclosure" >' in collapsed.data
+    assert b'<details class="beat-disclosure" open>' in focused.data
+    engine.dispose()
+
+
+def test_storyboard_generation_persists_controls_and_uses_trusted_paths(
+    catalog_settings: Settings,
+) -> None:
+    opened: list[str] = []
+    engine, _app, client, _service, workspace, _beat = _workspace_client(
+        catalog_settings, path_opener=opened.append
+    )
+    workspace_id = workspace["workspace_id"]
+
+    generated = client.post(
+        f"/stories/{workspace_id}/storyboard", follow_redirects=True
+    )
+
+    assert b"Storyboard generated" in generated.data
+    assert b"Storyboard ready" in generated.data
+    assert b"Open Storyboard Folder" in generated.data
+    assert b"View Storyboard in Browser" in generated.data
+    assert b"toolbar-actions" in generated.data
+    assert b"global-actions" in generated.data
+    view = client.get(f"/stories/{workspace_id}/storyboard/view")
+    assert view.status_code == 200
+    assert view.mimetype == "application/pdf"
+    assert view.data.startswith(b"%PDF")
+
+    client.post(
+        f"/stories/{workspace_id}/storyboard/open",
+        data={"path": "C:/untrusted/other.pdf"},
+    )
+    client.post(
+        f"/stories/{workspace_id}/storyboard/folder",
+        data={"path": "C:/untrusted"},
+    )
+    expected = catalog_settings.root / "Projects/web-story/Edit/storyboard.pdf"
+    assert opened == [str(expected), str(expected.parent)]
+    assert expected.is_file()
+    engine.dispose()
+
+
+def test_storyboard_os_open_failure_is_user_facing(
+    catalog_settings: Settings,
+) -> None:
+    def fail_open(path: str) -> None:
+        raise OSError("viewer unavailable")
+
+    engine, _app, client, service, workspace, _beat = _workspace_client(
+        catalog_settings, path_opener=fail_open
+    )
+    workspace_id = workspace["workspace_id"]
+    service.generate_storyboard(workspace_id)
+
+    response = client.post(
+        f"/stories/{workspace_id}/storyboard/open", follow_redirects=True
+    )
+
+    assert response.status_code == 200
+    assert b"storyboard could not be opened" in response.data
     engine.dispose()

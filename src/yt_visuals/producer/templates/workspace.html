@@ -7,22 +7,59 @@
       <h1>{{ workspace.title }}</h1>
       <p class="completion"><strong>{{ workspace.selected }} / {{ workspace.total }}</strong> beats selected</p>
     </div>
-    <div class="workspace-actions">
-      <form action="{{ url_for('open_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Edit Folder</button></form>
-      <button type="button" data-copy="{{ workspace.edit_folder }}">Copy Edit Folder Path</button>
-      <form action="{{ url_for('rebuild_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Rebuild Edit Folder</button></form>
-      <form action="{{ url_for('generate_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button class="primary" type="submit">Generate Storyboard</button></form>
+  </section>
+
+  {% if workspace.storyboard.exists %}
+    <section class="storyboard-status">
+      <strong>Storyboard ready</strong>
+      <span>{{ workspace.storyboard.path }}</span>
+    </section>
+  {% endif %}
+
+  <section class="production-toolbar" aria-label="Story production status">
+    <strong class="toolbar-title" title="{{ workspace.title }}">{{ workspace.title }}</strong>
+    <span class="toolbar-progress"><b>{{ workspace.selected }} / {{ workspace.total }}</b> SELECTED</span>
+    <span class="toolbar-storyboard">{{ 'Storyboard ready' if workspace.storyboard.exists else 'Storyboard pending' }}</span>
+    <div class="toolbar-actions">
+      <button type="button" data-expand-all>Expand All</button>
+      <button type="button" data-collapse-completed>Collapse Completed</button>
+      <details class="global-actions" data-global-actions>
+        <summary aria-label="Open workspace actions">☰ Actions</summary>
+        <div class="actions-menu">
+          <form action="{{ url_for('open_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Edit Folder</button></form>
+          <button type="button" data-copy="{{ workspace.edit_folder }}">Copy Edit Folder Path</button>
+          <form action="{{ url_for('rebuild_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Rebuild Edit Folder</button></form>
+          <form action="{{ url_for('generate_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">{{ 'Regenerate Storyboard' if workspace.storyboard.exists else 'Generate Storyboard' }}</button></form>
+          {% if workspace.storyboard.exists %}
+            <a class="button-link" href="{{ url_for('view_storyboard', workspace_id=workspace.workspace_id) }}" target="_blank">View Storyboard in Browser</a>
+            <form action="{{ url_for('open_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Storyboard</button></form>
+            <form action="{{ url_for('open_storyboard_folder', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Storyboard Folder</button></form>
+          {% endif %}
+        </div>
+      </details>
     </div>
   </section>
 
-  <div class="beats">
-    {% for beat in workspace.beats %}
+  <div class="workspace-layout">
+    <nav class="beat-navigator" aria-label="Beat navigator">
+      <strong>Beats</strong>
+      {% for beat in workspace.beats %}
+        <a href="#{{ beat.beat_id }}" class="{{ 'selected' if beat.selected else 'unselected' }}" data-beat-link="{{ beat.beat_id }}" aria-label="Beat {{ '%02d'|format(beat.sequence) }} {{ 'selected' if beat.selected else 'unselected' }}">
+          <span aria-hidden="true">{{ '✓' if beat.selected else '○' }}</span> {{ "%02d"|format(beat.sequence) }}
+        </a>
+      {% endfor %}
+    </nav>
+
+    <div class="beats">
+      {% for beat in workspace.beats %}
       {% set spec = beat.specification %}
-      <article class="beat-card" id="{{ beat.beat_id }}">
-        <header class="beat-heading">
-          <div><span class="sequence">{{ "%03d"|format(beat.sequence) }}</span><h2>{{ beat.beat_id }}</h2></div>
-          <div class="badges"><span>{{ spec.media_preference }}</span><span>{{ spec.source_requirement }}</span></div>
-        </header>
+      <article class="beat-card {{ 'completed' if beat.selected else 'incomplete' }}" id="{{ beat.beat_id }}" data-beat-card>
+        <details class="beat-disclosure" {% if not beat.selected or focused_beat == beat.beat_id %}open{% endif %}>
+          <summary class="beat-heading">
+            <div><span class="sequence">{{ "%03d"|format(beat.sequence) }}</span><span><h2>{{ beat.beat_id }}</h2><small>{{ spec.desired_visual }}</small></span></div>
+            <div class="beat-summary"><span class="completion-state">{{ '✓ SELECTED' if beat.selected else '○ NEEDS MEDIA' }}</span>{% if beat.selected %}<span>Asset {{ beat.selected.asset_id }} · {{ beat.selected.license.name or 'UNKNOWN' }}</span>{% endif %}<span class="badges"><span>{{ spec.media_preference }}</span><span>{{ spec.source_requirement }}</span></span></div>
+          </summary>
+          <div class="beat-content">
         <div class="brief-grid">
           <section><h3>Narration</h3><p>{{ spec.narration_context }}</p></section>
           <section><h3>Desired visual</h3><p>{{ spec.desired_visual }}</p></section>
@@ -66,50 +103,71 @@
           {% endif %}
         </section>
 
-        <section class="candidate-section">
-          <h3>Local catalog candidates</h3>
-          {% if beat.candidates %}
-            <div class="candidate-grid">
-              {% for candidate in beat.candidates %}
-                <div class="candidate">
-                  {% if candidate.media_type == 'image' %}<img src="{{ url_for('media', asset_id=candidate.asset_id) }}" alt="Local candidate {{ candidate.asset_id }}">{% else %}<video src="{{ url_for('media', asset_id=candidate.asset_id) }}" controls preload="metadata"></video>{% endif %}
-                  <div class="candidate-body">
-                    <strong>Asset {{ candidate.asset_id }} · {{ candidate.media_type }}</strong>
-                    <span>Used {{ candidate.usage_count }} time{% if candidate.usage_count != 1 %}s{% endif %}</span>
-                    <span>{{ candidate.source.provider or candidate.source.origin }} · License {{ candidate.license.name or 'UNKNOWN' }}</span>
-                    <div class="inline-actions">
-                      <form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button class="primary" type="submit">Use This</button></form>
-                      <form action="{{ url_for('hide_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button type="submit">Hide</button></form>
+        <section class="sourcing-sections">
+          <details class="sourcing-panel local" {% if focused_beat == beat.beat_id and open_panel == 'local' %}open{% endif %}>
+            <summary>Local Library / Upload</summary>
+            <div class="sourcing-body">
+              <h3>Local catalog candidates</h3>
+              {% if beat.candidates %}
+                <div class="candidate-grid">
+                  {% for candidate in beat.candidates %}
+                    <div class="candidate">
+                      {% if candidate.media_type == 'image' %}<img src="{{ url_for('media', asset_id=candidate.asset_id) }}" alt="Local candidate {{ candidate.asset_id }}">{% else %}<video src="{{ url_for('media', asset_id=candidate.asset_id) }}" controls preload="metadata"></video>{% endif %}
+                      <div class="candidate-body">
+                        <strong>Asset {{ candidate.asset_id }} · {{ candidate.media_type }}</strong>
+                        <span>Used {{ candidate.usage_count }} time{% if candidate.usage_count != 1 %}s{% endif %}</span>
+                        <span>{{ candidate.source.provider or candidate.source.origin }} · License {{ candidate.license.name or 'UNKNOWN' }}</span>
+                        <div class="inline-actions">
+                          <form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button class="primary" type="submit">Use This</button></form>
+                          <form action="{{ url_for('hide_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button type="submit">Hide</button></form>
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  {% endfor %}
                 </div>
-              {% endfor %}
+              {% else %}<p class="empty-state">No matching local candidates.</p>{% endif %}
+              {% if beat.hidden_asset_ids %}
+                <details class="hidden-assets"><summary>{{ beat.hidden_asset_ids|length }} hidden for this beat</summary>{% for asset_id in beat.hidden_asset_ids %}<form action="{{ url_for('restore_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=asset_id) }}" method="post"><button type="submit">Restore asset {{ asset_id }}</button></form>{% endfor %}</details>
+              {% endif %}
+              <div class="upload-source">
+                <h3>Upload a local file</h3>
+                <form action="{{ url_for('upload_media', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post" enctype="multipart/form-data">
+                  <input type="file" name="media_file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,.mkv,.m4v" required>
+                  <button type="submit">Upload &amp; Use</button>
+                </form>
+                <small>Uploads are validated, SHA-256 deduplicated, and cataloged without an invented license.</small>
+              </div>
             </div>
-          {% else %}<p class="empty-state">No matching local candidates.</p>{% endif %}
-          {% if beat.hidden_asset_ids %}
-            <details class="hidden-assets"><summary>{{ beat.hidden_asset_ids|length }} hidden for this beat</summary>{% for asset_id in beat.hidden_asset_ids %}<form action="{{ url_for('restore_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=asset_id) }}" method="post"><button type="submit">Restore asset {{ asset_id }}</button></form>{% endfor %}</details>
-          {% endif %}
+          </details>
+          <details class="sourcing-panel pexels" {% if focused_beat == beat.beat_id and open_panel == 'pexels' %}open{% endif %}>
+            <summary>Pexels</summary>
+            <div class="sourcing-body">
+              <form action="{{ url_for('import_pexels', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post">
+                <input type="url" name="source_url" placeholder="https://www.pexels.com/photo/...-12345/" required>
+                <button type="submit">Import &amp; Use</button>
+              </form>
+              <small>Only Pexels photo and video page URLs are supported; arbitrary page scraping is intentionally disabled.</small>
+            </div>
+          </details>
+          <details class="sourcing-panel external" {% if focused_beat == beat.beat_id and open_panel == 'external' %}open{% endif %}>
+            <summary>External / Other Source</summary>
+            <div class="sourcing-body">
+              <form action="{{ url_for('import_external', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post">
+                <label>Direct media URL or Wikimedia Commons file page <input type="url" name="direct_media_url" placeholder="https://media.example.org/image.jpg" required></label>
+                <label>Source page URL <input type="url" name="source_page_url" placeholder="https://example.org/item-page"></label>
+                <label>Creator / Attribution <input type="text" name="creator_attribution" placeholder="Creator name or requested credit"></label>
+                <label>License name <input type="text" name="license_name" placeholder="Optional; leave blank if unknown"></label>
+                <label>License URL <input type="url" name="license_url" placeholder="https://example.org/license"></label>
+                <button type="submit">Import &amp; Use</button>
+              </form>
+              <small>Provide a direct HTTPS media URL, or a Wikimedia Commons file page. Source and license fields are preserved separately; permissions are never inferred.</small>
+            </div>
+          </details>
         </section>
-
-        <section class="manual-import">
-          <div>
-            <h3>Import a Pexels page</h3>
-            <form action="{{ url_for('import_pexels', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post">
-              <input type="url" name="source_url" placeholder="https://www.pexels.com/photo/...-12345/" required>
-              <button type="submit">Import &amp; Use</button>
-            </form>
-            <small>Only Pexels photo and video page URLs are supported; arbitrary page scraping is intentionally disabled.</small>
           </div>
-          <div>
-            <h3>Upload a local file</h3>
-            <form action="{{ url_for('upload_media', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post" enctype="multipart/form-data">
-              <input type="file" name="media_file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,.mkv,.m4v" required>
-              <button type="submit">Upload &amp; Use</button>
-            </form>
-            <small>Uploads are validated, SHA-256 deduplicated, and cataloged without an invented license.</small>
-          </div>
-        </section>
+        </details>
       </article>
-    {% endfor %}
+      {% endfor %}
+    </div>
   </div>
 {% endblock %}

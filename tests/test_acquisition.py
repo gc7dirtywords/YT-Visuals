@@ -12,7 +12,13 @@ from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from yt_visuals.acquisition import AcquisitionContext, AcquisitionService, ProbeResult, safe_filename
+from yt_visuals.acquisition import (
+    AcquisitionContext,
+    AcquisitionService,
+    ProbeResult,
+    YT_VISUALS_USER_AGENT,
+    safe_filename,
+)
 from yt_visuals.config import Settings
 from yt_visuals.database import initialize_database
 from yt_visuals.library import LibraryScanner
@@ -70,6 +76,14 @@ def jpeg_bytes(size: tuple[int, int] = (64, 36)) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", size, "navy").save(buffer, format="JPEG")
     return buffer.getvalue()
+
+
+def test_owned_http_client_uses_descriptive_user_agent(catalog_settings: Settings) -> None:
+    engine = initialize_database(catalog_settings)
+    service = AcquisitionService(catalog_settings, engine)
+    assert service.http_client.headers["User-Agent"] == YT_VISUALS_USER_AGENT
+    service.close()
+    engine.dispose()
 
 
 def test_streamed_download_hash_safe_filename_and_catalog_insertion(
