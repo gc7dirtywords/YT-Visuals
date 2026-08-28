@@ -1,11 +1,13 @@
 {% extends "base.html" %}
 {% block title %}{{ workspace.title }} · YT-Visuals{% endblock %}
 {% block content %}
+  <nav class="breadcrumbs"><a href="{{ url_for('index') }}">← Workspaces</a>{% if workspace.release %}<span>/</span><a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>{% endif %}</nav>
   <section class="workspace-header">
     <div>
       <p class="eyebrow">{{ workspace.story_id }}</p>
       <h1>{{ workspace.title }}</h1>
       <p class="completion"><strong>{{ workspace.selected }} / {{ workspace.total }}</strong> beats selected</p>
+      <p class="organization-summary">Status: <strong>{{ workspace.status|replace('_', ' ')|title }}</strong>{% if workspace.release %} · Video Release: <a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>{% if workspace.release_position %} · {{ workspace.release_position }} of {{ workspace.release_count }}{% endif %}{% endif %}</p>
     </div>
   </section>
 
@@ -26,6 +28,12 @@
       <details class="global-actions" data-global-actions>
         <summary aria-label="Open workspace actions">☰ Actions</summary>
         <div class="actions-menu">
+          <details class="rename-story"><summary>Rename Story</summary><form action="{{ url_for('rename_workspace_title', workspace_id=workspace.workspace_id) }}" method="post"><label>Story display title <input name="title" value="{{ workspace.title }}" required></label><button type="submit">Save title</button></form></details>
+          <details class="organization-controls"><summary>Workspace Organization</summary>
+            <form action="{{ url_for('update_workspace_status', workspace_id=workspace.workspace_id) }}" method="post"><label>Status <select name="status">{% for value, label in [('planned','Planned'),('in_production','In Production'),('completed','Completed')] %}<option value="{{ value }}" {% if workspace.status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button type="submit">Update status</button></form>
+            <form action="{{ url_for('assign_workspace_release', workspace_id=workspace.workspace_id) }}" method="post"><label>Video Release <select name="release_id"><option value="">Unassigned</option>{% for release in releases %}<option value="{{ release.id }}" {% if workspace.release and workspace.release.id == release.id %}selected{% endif %}>{{ release.name }}</option>{% endfor %}</select></label><button type="submit">Update release</button></form>
+            {% if workspace.release %}<form action="{{ url_for('move_workspace_release', workspace_id=workspace.workspace_id, direction='up') }}" method="post"><button type="submit">Move story up</button></form><form action="{{ url_for('move_workspace_release', workspace_id=workspace.workspace_id, direction='down') }}" method="post"><button type="submit">Move story down</button></form>{% endif %}
+          </details>
           <form action="{{ url_for('open_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Edit Folder</button></form>
           <button type="button" data-copy="{{ workspace.edit_folder }}">Copy Edit Folder Path</button>
           <form action="{{ url_for('rebuild_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Rebuild Edit Folder</button></form>
@@ -35,6 +43,7 @@
             <form action="{{ url_for('open_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Storyboard</button></form>
             <form action="{{ url_for('open_storyboard_folder', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Storyboard Folder</button></form>
           {% endif %}
+          <details class="delete-workspace"><summary>Delete workspace</summary><p>Deletes this workspace and its project files only. Master Library assets remain.</p><form action="{{ url_for('delete_workspace', workspace_id=workspace.workspace_id) }}" method="post"><label>Type <code>{{ workspace.story_id }}</code> to confirm <input name="confirm" required></label><button type="submit">Delete workspace</button></form></details>
         </div>
       </details>
     </div>
@@ -66,6 +75,8 @@
           <section><h3>Must have</h3><p>{{ spec.must_have|join(' · ') if spec.must_have else 'None specified' }}</p></section>
           <section><h3>Avoid</h3><p>{{ spec.avoid|join(' · ') if spec.avoid else 'None specified' }}</p></section>
         </div>
+
+        <details class="beat-requirements"><summary>Producer sourcing requirements</summary><p>These current requirements guide sourcing and storyboard output. The imported Visual Plan remains unchanged.</p><form action="{{ url_for('update_beat_requirements', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><label>Media preference <select name="media_preference">{% for value in ['image','video','either'] %}<option value="{{ value }}" {% if spec.media_preference == value %}selected{% endif %}>{{ value|title }}</option>{% endfor %}</select></label><label>Source requirement <select name="source_requirement">{% for value in ['representative','exact'] %}<option value="{{ value }}" {% if spec.source_requirement == value %}selected{% endif %}>{{ value|title }}</option>{% endfor %}</select></label><button type="submit">Update requirements</button></form></details>
 
         {% if spec.production_opportunities %}
           <section class="opportunities">
@@ -119,6 +130,7 @@
                         <span>{{ candidate.source.provider or candidate.source.origin }} · License {{ candidate.license.name or 'UNKNOWN' }}</span>
                         <div class="inline-actions">
                           <form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button class="primary" type="submit">Use This</button></form>
+                          {% if spec.media_preference != 'either' and spec.media_preference != candidate.media_type %}<form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><input type="hidden" name="override_media_preference" value="1"><button type="submit">Use &amp; set {{ candidate.media_type }}</button></form>{% endif %}
                           <form action="{{ url_for('hide_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button type="submit">Hide</button></form>
                         </div>
                       </div>
@@ -126,6 +138,8 @@
                   {% endfor %}
                 </div>
               {% else %}<p class="empty-state">No matching local candidates.</p>{% endif %}
+              <div class="existing-media-search"><h3>Search existing library</h3><form action="{{ url_for('search_existing_media', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><input type="search" name="local_query" value="{{ request.args.get('local_query', '') if request.args.get('local_beat') == beat.id else '' }}" placeholder="Search catalog media"><button type="submit">Search</button></form>{% if request.args.get('local_beat') == beat.id and request.args.get('local_query') and not beat.existing_search %}<p class="empty-state">No matching existing catalog media.</p>{% endif %}{% if beat.existing_search %}<div class="candidate-grid">{% for candidate in beat.existing_search %}<div class="candidate">{% if candidate.media_type == 'image' %}<img src="{{ url_for('media', asset_id=candidate.asset_id) }}" alt="Catalog asset {{ candidate.asset_id }}">{% else %}<video src="{{ url_for('media', asset_id=candidate.asset_id) }}" controls preload="metadata"></video>{% endif %}<div class="candidate-body"><strong>Asset {{ candidate.asset_id }} · {{ candidate.media_type }}</strong><span>{{ candidate.source.provider or candidate.source.origin }} · License {{ candidate.license.name or 'UNKNOWN' }}</span><div class="inline-actions"><form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button class="primary" type="submit">Use This</button></form>{% if spec.media_preference != 'either' and spec.media_preference != candidate.media_type %}<form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><input type="hidden" name="override_media_preference" value="1"><button type="submit">Use &amp; set {{ candidate.media_type }}</button></form>{% endif %}</div></div></div>{% endfor %}</div>{% endif %}</div>
+              {% for group, label in [('release', 'Used in This Release'), ('story', 'Used in This Story'), ('recent', 'Recently Selected')] %}{% if beat.reuse[group] %}<section class="reuse-media"><h3>{{ label }}</h3><div class="candidate-grid">{% for candidate in beat.reuse[group] %}<div class="candidate">{% if candidate.media_type == 'image' %}<img src="{{ url_for('media', asset_id=candidate.asset_id) }}" alt="Reusable asset {{ candidate.asset_id }}">{% else %}<video src="{{ url_for('media', asset_id=candidate.asset_id) }}" controls preload="metadata"></video>{% endif %}<div class="candidate-body"><strong>Asset {{ candidate.asset_id }} · {{ candidate.media_type }}</strong><span>Used in: {% for use in candidate.used_in %}{{ use.story_title }} · {{ use.beat_id }}{% if not loop.last %}; {% endif %}{% endfor %}</span><div class="inline-actions"><form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button class="primary" type="submit">Use This</button></form>{% if spec.media_preference != 'either' and spec.media_preference != candidate.media_type %}<form action="{{ url_for('select_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><input type="hidden" name="override_media_preference" value="1"><button type="submit">Use &amp; set {{ candidate.media_type }}</button></form>{% endif %}</div></div></div>{% endfor %}</div></section>{% endif %}{% endfor %}
               {% if beat.hidden_asset_ids %}
                 <details class="hidden-assets"><summary>{{ beat.hidden_asset_ids|length }} hidden for this beat</summary>{% for asset_id in beat.hidden_asset_ids %}<form action="{{ url_for('restore_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=asset_id) }}" method="post"><button type="submit">Restore asset {{ asset_id }}</button></form>{% endfor %}</details>
               {% endif %}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import re
 from pathlib import Path
@@ -14,7 +15,8 @@ from yt_visuals.acquisition import AcquisitionService
 from yt_visuals.config import Settings
 from yt_visuals.credentials import CredentialStore, PEXELS_CREDENTIAL_NAME, SERVICE_NAME
 from yt_visuals.database import initialize_database
-from yt_visuals.models import MediaAsset, MediaDownload, MediaSource, ProducerBeat
+from yt_visuals.library import LibraryScanner
+from yt_visuals.models import MediaAsset, MediaDownload, MediaLocation, MediaSource, ProducerBeat
 from yt_visuals.providers.errors import ProviderAuthenticationError, ProviderConnectionError
 from yt_visuals.producer.web import create_app
 from yt_visuals.producer.service import (
@@ -554,4 +556,191 @@ def test_storyboard_os_open_failure_is_user_facing(
 
     assert response.status_code == 200
     assert b"storyboard could not be opened" in response.data
+    engine.dispose()
+
+
+def test_dashboard_organization_and_delete_confirmation(catalog_settings: Settings) -> None:
+    engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
+    release = service.create_release("EP0001")
+    service.assign_workspace_release(workspace["workspace_id"], release["id"])
+    service.update_workspace_status(workspace["workspace_id"], "completed")
+    dashboard = client.get("/?show_finished=1")
+    assert b"In Production" in dashboard.data and b"Planned" in dashboard.data and b"Completed" in dashboard.data
+    assert b"EP0001" in dashboard.data
+    rejected = client.post(f"/stories/{workspace['workspace_id']}/delete", data={"confirm": "wrong"})
+    assert rejected.status_code == 302
+    assert service.get_workspace(workspace["workspace_id"], include_candidates=False)["status"] == "completed"
+    engine.dispose()
+
+
+def test_rendered_release_form_create_list_assign_and_refresh(catalog_settings: Settings) -> None:
+    engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
+    dashboard = client.get("/")
+    form = re.search(
+        rb'<form action="([^"]*/releases)" method="post">(.*?)</form>',
+        dashboard.data,
+        re.DOTALL,
+    )
+    assert form is not None
+    assert b"Create Video Release" in dashboard.data
+    assert b'placeholder="e.g. ECH-R00001 - Hauntings Behind Horror Movies"' in form.group(2)
+    assert b'value="' not in form.group(2)
+    names = {item.decode() for item in re.findall(rb'name="([^"]+)"', form.group(2))}
+    assert names == {"name"}
+
+    created = client.post(
+        form.group(1).decode(),
+        data={"name": "EP0001-Hauntings Behind Horror Movies"},
+    )
+    assert created.status_code == 302
+    release = service.list_releases()[0]
+    listed = client.get("/")
+    assert b"Video Releases" in listed.data
+    assert b"EP0001-Hauntings Behind Horror Movies" in listed.data
+    assert b"0 stories" in listed.data
+
+    workspace_page = client.get(f"/stories/{workspace['workspace_id']}")
+    assert release["id"].encode() in workspace_page.data
+    assigned = client.post(
+        f"/stories/{workspace['workspace_id']}/organization/release",
+        data={"release_id": release["id"]},
+        follow_redirects=True,
+    )
+    assert b"EP0001-Hauntings Behind Horror Movies" in assigned.data
+    refreshed = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    assert refreshed["release"]["id"] == release["id"]
+    assert refreshed["release"]["name"] == release["name"]
+    assert refreshed["release"]["status"] == "planned"
+    engine.dispose()
+
+
+def test_compact_import_navigation_release_metadata_and_finished_filter(catalog_settings: Settings) -> None:
+    engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
+    dashboard = client.get("/")
+    assert b"+ Import Visual Plan" in dashboard.data
+    assert b'<details class="compact-import" >' in dashboard.data
+    assert b'class="dashboard-columns"' in dashboard.data
+    assert b'class="dashboard-column release-column"' in dashboard.data
+    assert b'class="dashboard-column story-column"' in dashboard.data
+    failed = client.post("/plans", data={}, follow_redirects=True)
+    assert b"Choose a Visual Plan JSON file" in failed.data
+    assert b'<details class="compact-import" open>' in failed.data
+
+    release = service.create_release("Release metadata")
+    service.assign_workspace_release(workspace["workspace_id"], release["id"])
+    detail = client.post(
+        f"/releases/{release['id']}/metadata",
+        data={"status": "in_production", "release_date": "2026-10-31"},
+        follow_redirects=True,
+    )
+    assert b"In Production" in detail.data and b"2026-10-31" in detail.data
+    assert b"Workspaces" in detail.data
+    workspace_page = client.get(f"/stories/{workspace['workspace_id']}")
+    assert b"Workspaces" in workspace_page.data and b"Release metadata" in workspace_page.data
+    service.update_workspace_status(workspace["workspace_id"], "completed")
+    service.update_release_metadata(release["id"], status="released", release_date="2026-10-31")
+    hidden = client.get("/")
+    shown = client.get("/?show_finished=1")
+    assert b"Release metadata" not in hidden.data
+    assert b"Release metadata" in shown.data and b"Completed" in shown.data
+    engine.dispose()
+
+
+def test_actions_rename_story_is_discoverable_and_preserves_story_identity(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
+    release = service.create_release("Rename release")
+    service.assign_workspace_release(workspace["workspace_id"], release["id"])
+    before = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    page = client.get(f"/stories/{workspace['workspace_id']}")
+    assert b"Rename Story" in page.data
+    assert b'name="title" value="Web Story"' in page.data
+    renamed = client.post(
+        f"/stories/{workspace['workspace_id']}/organization/title",
+        data={"title": "Renamed Web Story"}, follow_redirects=True,
+    )
+    assert b"Story display title updated" in renamed.data
+    after = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    assert after["title"] == "Renamed Web Story"
+    assert after["story_id"] == before["story_id"]
+    assert after["workspace_id"] == before["workspace_id"]
+    assert after["edit_folder"] == before["edit_folder"]
+    assert b"Renamed Web Story" in client.get("/").data
+    assert b"Renamed Web Story" in client.get(f"/releases/{release['id']}").data
+    engine.dispose()
+
+
+def test_existing_media_search_redirects_to_same_local_beat_and_keeps_query(
+    catalog_settings: Settings,
+) -> None:
+    library_file = catalog_settings.root / "Library" / "Images" / "closed-old-door.jpg"
+    library_file.parent.mkdir(parents=True, exist_ok=True)
+    library_file.write_bytes(_jpeg().read())
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    LibraryScanner(catalog_settings, engine).scan()
+    search = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/search",
+        data={"local_query": "closed door"},
+    )
+    assert search.status_code == 302
+    assert "focus=beat-001" in search.headers["Location"]
+    assert "panel=local" in search.headers["Location"]
+    assert "local_query=closed+door" in search.headers["Location"]
+    assert search.headers["Location"].endswith("#beat-001")
+    rendered = client.get(search.headers["Location"])
+    assert b'value="closed door"' in rendered.data
+    assert b'<details class="sourcing-panel local" open>' in rendered.data
+    assert b'<details class="beat-disclosure" open>' in rendered.data
+    assert b"Catalog asset" in rendered.data
+
+    no_results = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/search",
+        data={"local_query": "nothing-matches-this"},
+        follow_redirects=True,
+    )
+    assert b"No existing catalog media matched" in no_results.data
+    assert b"No matching existing catalog media" in no_results.data
+    assert b'<details class="sourcing-panel local" open>' in no_results.data
+    empty = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/search",
+        data={"local_query": ""}, follow_redirects=True,
+    )
+    assert b"Enter a catalog search term" in empty.data
+    assert b'<details class="sourcing-panel local" open>' in empty.data
+    engine.dispose()
+
+
+def test_incompatible_catalog_selection_is_visible_and_can_be_overridden(catalog_settings: Settings) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    video_path = catalog_settings.root / "Library" / "Videos" / "route-video.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"route-test-video")
+    sha256 = hashlib.sha256(video_path.read_bytes()).hexdigest()
+    with Session(engine) as session:
+        asset = MediaAsset(
+            relative_path="Library/Videos/route-video.mp4", media_type="video", status="active",
+            file_size_bytes=video_path.stat().st_size, sha256=sha256,
+        )
+        session.add(asset)
+        session.flush()
+        session.add(MediaLocation(
+            media_asset_id=asset.id, relative_path="Library/Videos/route-video.mp4",
+            status="available", provenance_type="local_import", file_size_bytes=video_path.stat().st_size,
+        ))
+        session.commit()
+        asset_id = asset.id
+    failed = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/select/{asset_id}",
+        follow_redirects=True,
+    )
+    assert b"currently prefers an image" in failed.data
+    assert b'<details class="sourcing-panel local" open>' in failed.data
+    assert b'<details class="beat-disclosure" open>' in failed.data
+    overridden = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/select/{asset_id}",
+        data={"override_media_preference": "1"}, follow_redirects=True,
+    )
+    assert b"Asset selected for this beat" in overridden.data
+    assert service.get_workspace(workspace["workspace_id"], include_candidates=False)["beats"][0]["specification"]["media_preference"] == "video"
     engine.dispose()

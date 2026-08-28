@@ -1,28 +1,38 @@
 {% extends "base.html" %}
-{% block title %}Visual Plans · YT-Visuals{% endblock %}
+{% block title %}Workspaces · YT-Visuals{% endblock %}
 {% block content %}
-  <section class="hero">
-    <p class="eyebrow">Producer-led sourcing</p>
-    <h1>Bring in a Visual Plan</h1>
-    <p>Import the beat-by-beat plan from your ChatGPT Project, then choose every visual yourself.</p>
-    <form class="import-form" action="{{ url_for('import_plan') }}" method="post" enctype="multipart/form-data">
-      <label for="visual-plan">Visual Plan JSON</label>
-      <input id="visual-plan" type="file" name="visual_plan" accept="application/json,.json" required>
-      <button class="primary" type="submit">Import Visual Plan</button>
-    </form>
+  <section class="dashboard-heading">
+    <div><p class="eyebrow">Producer-led sourcing</p><h1>Workspaces</h1></div>
+    <a class="button-link" href="{{ url_for('index', show_finished='0' if show_finished else '1') }}">{{ 'Hide completed / released' if show_finished else 'Show completed / released' }}</a>
   </section>
-  {% if workspaces %}
-    <section>
-      <div class="section-heading"><h2>Production workspaces</h2></div>
-      <div class="workspace-grid">
-        {% for item in workspaces %}
-          <a class="workspace-tile" href="{{ url_for('workspace', workspace_id=item.workspace_id) }}">
-            <strong>{{ item.title }}</strong>
-            <span>{{ item.story_id }}</span>
-            <span>{{ item.selected }} / {{ item.total }} beats selected</span>
-          </a>
-        {% endfor %}
-      </div>
+
+  <details class="compact-import" {% if show_import or not (buckets.planned or buckets.in_production or buckets.completed) %}open{% endif %}>
+    <summary>+ Import Visual Plan</summary>
+    <form action="{{ url_for('import_plan') }}" method="post" enctype="multipart/form-data">
+      <input id="visual-plan" type="file" name="visual_plan" accept="application/json,.json" required>
+      <button class="primary" type="submit">Import</button>
+    </form>
+  </details>
+
+  <div class="dashboard-columns">
+    <aside class="dashboard-column release-column">
+      <div class="section-heading"><h2>Video Releases</h2></div>
+      <section class="release-manager release-creator">
+        <h3>Create Video Release</h3>
+        <form action="{{ url_for('create_release') }}" method="post"><input name="name" aria-label="Video release name" placeholder="e.g. ECH-R00001 - Hauntings Behind Horror Movies" required><button type="submit">Create Release</button></form>
+      </section>
+      {% if releases %}<div class="workspace-grid release-grid">{% for release in releases %}<a class="workspace-tile" href="{{ url_for('release_detail', release_id=release.id) }}"><strong>{{ release.name }}</strong><span>{{ release.status|replace('_', ' ')|title }}{% if release.release_date %} · {{ release.release_date }}{% endif %}</span><span>{{ release.workspaces|length }} stories</span></a>{% endfor %}</div>{% else %}<p class="empty-state">No {{ 'visible ' if not show_finished else '' }}video releases.</p>{% endif %}
+    </aside>
+    <section class="dashboard-column story-column">
+      <div class="section-heading"><h2>Stories</h2></div>
+      {% for status, label in [('in_production', 'In Production'), ('planned', 'Planned'), ('completed', 'Completed')] %}
+        {% if status != 'completed' or show_finished %}
+        <section class="workspace-bucket">
+          <div class="section-heading"><h3>{{ label }} <small>{{ buckets[status]|length }}</small></h3></div>
+          {% if buckets[status] %}<div class="workspace-grid">{% for item in buckets[status] %}<a class="workspace-tile" href="{{ url_for('workspace', workspace_id=item.workspace_id) }}"><strong>{{ item.title }}</strong><span>{{ item.story_id }}</span><span>{{ item.selected }} / {{ item.total }} beats selected</span>{% if item.release %}<span>{{ item.release.name }}{% if item.release_position %} · Story {{ item.release_position }}{% endif %}</span>{% endif %}</a>{% endfor %}</div>{% else %}<p class="empty-state">No workspaces.</p>{% endif %}
+        </section>
+        {% endif %}
+      {% endfor %}
     </section>
-  {% endif %}
+  </div>
 {% endblock %}

@@ -17,9 +17,13 @@ from yt_visuals.config import Settings
 from yt_visuals.database import initialize_database
 from yt_visuals.library import LibraryScanner
 from yt_visuals.models import (
+    AssetLicense,
     MediaAsset,
     MediaDownload,
     MediaSource,
+    MediaLocation,
+    ProducerBeat,
+    ProducerWorkspace,
     ProducerBeatHiddenAsset,
 )
 from yt_visuals.producer.contracts import VisualPlan
@@ -604,6 +608,209 @@ def test_wikimedia_resolver_sends_descriptive_user_agent_and_tolerates_bad_metad
     assert resolved.creator_attribution is None
     assert resolved.license_name is None
     assert resolved.license_url is None
+
+
+def test_workspace_organization_release_order_and_safe_delete(catalog_settings: Settings) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    first = service.get_workspace(imported["workspace_id"], include_candidates=False)
+    plan_data = _plan().model_dump(mode="json")
+    plan_data["story"] = {"story_id": "producer-story-two", "title": "Second Story"}
+    plan_data["beats"][0]["beat_id"] = "second-001"
+    plan_data["beats"][1]["beat_id"] = "second-002"
+    second_import = service.import_plan(VisualPlan.model_validate(plan_data))
+    release = service.create_release("EP0001-Hauntings Behind Horror Movies")
+    service.assign_workspace_release(first["workspace_id"], release["id"])
+    service.assign_workspace_release(second_import["workspace_id"], release["id"])
+    service.update_workspace_status(second_import["workspace_id"], "planned")
+    service.move_workspace_release_position(second_import["workspace_id"], -1)
+    detail = service.get_release(release["id"])
+    assert [item["title"] for item in detail["workspaces"]] == ["Second Story", "Producer Story"]
+    assert detail["workspaces"][0]["status"] == "planned"
+    with pytest.raises(ProducerWorkflowError, match="still contains"):
+        service.delete_release(release["id"])
+    service.assign_workspace_release(first["workspace_id"], None)
+    assert service.get_workspace(first["workspace_id"], include_candidates=False)["release"] is None
+    project = catalog_settings.root / "Projects" / first["story_id"]
+    project.mkdir(parents=True, exist_ok=True)
+    (project / "generated.txt").write_text("workspace only", encoding="utf-8")
+    service.delete_workspace(first["workspace_id"])
+    assert not project.exists()
+    assert all(item["workspace_id"] != first["workspace_id"] for item in service.list_workspaces())
+    assert service.get_release(release["id"])["name"] == release["name"]
+    engine.dispose()
+
+
+def test_delete_one_of_four_workspaces_preserves_other_beats_and_shared_media(
+    catalog_settings: Settings,
+) -> None:
+    engine = initialize_database(catalog_settings)
+    service = ProducerWorkflowService(catalog_settings, engine)
+
+    def make_plan(story_id: str, title: str, beat_count: int) -> VisualPlan:
+        data = _plan().model_dump(mode="json")
+        data["story"] = {"story_id": story_id, "title": title}
+        template = data["beats"][0]
+        data["beats"] = [
+            {**template, "beat_id": f"{story_id}-{sequence}", "sequence": sequence}
+            for sequence in range(1, beat_count + 1)
+        ]
+        return VisualPlan.model_validate(data)
+
+    plans = [
+        make_plan("workspace-a", "Workspace A", 3),
+        make_plan("workspace-b", "Workspace B", 4),
+        make_plan("workspace-c", "Workspace C", 2),
+        make_plan("workspace-test", "Test Workspace", 1),
+    ]
+    imported = [service.import_plan(plan) for plan in plans]
+    test_workspace = service.get_workspace(imported[3]["workspace_id"], include_candidates=False)
+    shared_file = catalog_settings.root / "Temp" / "shared-delete-safety.jpg"
+    _image(shared_file, "darkred")
+    shared = service.import_upload(
+        test_workspace["workspace_id"], test_workspace["beats"][0]["id"], shared_file, shared_file.name
+    )
+    with Session(engine) as session:
+        session.add(AssetLicense(asset_id=shared["asset_id"], license_name="Test License"))
+        session.commit()
+    first_workspace = service.get_workspace(imported[0]["workspace_id"], include_candidates=False)
+    service.select_asset(first_workspace["workspace_id"], first_workspace["beats"][0]["id"], shared["asset_id"])
+    project = catalog_settings.root / "Projects" / test_workspace["story_id"]
+    project.mkdir(parents=True, exist_ok=True)
+    (project / "generated.txt").write_text("test workspace only", encoding="utf-8")
+
+    repeated = service.import_plan(plans[0])
+    assert repeated["workspace_id"] == imported[0]["workspace_id"]
+    assert repeated["idempotent"] is True
+    assert service.get_workspace(repeated["workspace_id"], include_candidates=False)["total"] == 3
+    service.delete_workspace(test_workspace["workspace_id"])
+
+    assert not project.exists()
+    assert [service.get_workspace(item["workspace_id"], include_candidates=False)["total"] for item in imported[:3]] == [3, 4, 2]
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(ProducerWorkspace)) == 3
+        assert session.scalar(select(func.count()).select_from(ProducerBeat)) == 9
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 1
+        assert session.scalar(select(func.count()).select_from(MediaSource)) == 1
+        assert session.scalar(select(func.count()).select_from(AssetLicense)) == 1
+    assert (catalog_settings.root / "Library" / "Images").exists()
+    engine.dispose()
+
+
+def test_workspace_delete_filesystem_failure_keeps_database_state(
+    catalog_settings: Settings, monkeypatch
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    workspace = service.get_workspace(imported["workspace_id"], include_candidates=False)
+    project = catalog_settings.root / "Projects" / workspace["story_id"]
+    project.mkdir(parents=True, exist_ok=True)
+
+    def fail_delete(_path):
+        raise OSError("locked")
+
+    monkeypatch.setattr(producer_service_module.shutil, "rmtree", fail_delete)
+    with pytest.raises(ProducerWorkflowError, match="workspace was kept"):
+        service.delete_workspace(workspace["workspace_id"])
+    assert service.get_workspace(workspace["workspace_id"], include_candidates=False)["total"] == 2
+    assert project.exists()
+    engine.dispose()
+
+
+def test_release_metadata_sorting_title_rename_and_cross_story_reuse(
+    catalog_settings: Settings,
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    first = service.get_workspace(imported["workspace_id"], include_candidates=False)
+    plan_data = _plan().model_dump(mode="json")
+    plan_data["story"] = {"story_id": "second-producer-story", "title": "Second Producer Story"}
+    plan_data["beats"][0]["beat_id"] = "second-001"
+    plan_data["beats"][1]["beat_id"] = "second-002"
+    second_import = service.import_plan(VisualPlan.model_validate(plan_data))
+    second = service.get_workspace(second_import["workspace_id"], include_candidates=False)
+
+    release = service.create_release("Active undated")
+    near = service.create_release("Active near")
+    old = service.create_release("Released old")
+    new = service.create_release("Released new")
+    assert release["status"] == "planned"
+    service.update_release_metadata(near["id"], status="in_production", release_date="2026-09-10")
+    service.update_release_metadata(old["id"], status="released", release_date="2026-01-01")
+    service.update_release_metadata(new["id"], status="released", release_date="2026-08-01")
+    assert [item["name"] for item in service.list_releases(show_released=True)] == [
+        "Active near", "Active undated", "Released new", "Released old"
+    ]
+    assert [item["name"] for item in service.list_releases(show_released=False)] == [
+        "Active near", "Active undated"
+    ]
+
+    original_story_id = first["story_id"]
+    original_edit = service.edit_folder(original_story_id)
+    service.rename_workspace_title(first["workspace_id"], "Renamed Story Display")
+    renamed = service.get_workspace(first["workspace_id"], include_candidates=False)
+    assert renamed["title"] == "Renamed Story Display"
+    assert renamed["story_id"] == original_story_id
+    assert service.edit_folder(renamed["story_id"]) == original_edit
+
+    service.assign_workspace_release(first["workspace_id"], release["id"])
+    service.assign_workspace_release(second["workspace_id"], release["id"])
+    upload = catalog_settings.root / "Temp" / "shared.jpg"
+    _image(upload, "olive")
+    asset = service.import_upload(first["workspace_id"], first["beats"][0]["id"], upload, "shared.jpg")
+    service.select_asset(second["workspace_id"], second["beats"][0]["id"], asset["asset_id"])
+    service.select_asset(second["workspace_id"], second["beats"][1]["id"], asset["asset_id"])
+    reuse = service.get_workspace(second["workspace_id"], include_candidates=False)["beats"][0]["reuse"]
+    rendered_ids = [item["asset_id"] for group in ("release", "story", "recent") for item in reuse[group]]
+    assert rendered_ids == [asset["asset_id"]]
+    assert len(reuse["release"][0]["used_in"]) == 2
+    searched = service.get_workspace(
+        second["workspace_id"], include_candidates=False, local_query="shared", local_beat_id=second["beats"][0]["id"]
+    )["beats"][0]
+    assert [item["asset_id"] for item in searched["existing_search"]] == [asset["asset_id"]]
+    assert all(not searched["reuse"][group] for group in ("release", "story", "recent"))
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 1
+    engine.dispose()
+
+
+def test_producer_requirement_override_persists_without_rewriting_plan(
+    catalog_settings: Settings,
+) -> None:
+    engine = initialize_database(catalog_settings)
+    service = ProducerWorkflowService(catalog_settings, engine)
+    imported = service.import_plan(_plan(preference="image"))
+    workspace = service.get_workspace(imported["workspace_id"], include_candidates=False)
+    beat = workspace["beats"][0]
+    video_path = catalog_settings.root / "Library" / "Videos" / "override.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"not-a-real-video-but-a-cataloged-selection")
+    sha256 = hashlib.sha256(video_path.read_bytes()).hexdigest()
+    with Session(engine) as session:
+        asset = MediaAsset(
+            relative_path="Library/Videos/override.mp4", media_type="video", status="active",
+            file_size_bytes=video_path.stat().st_size, sha256=sha256,
+        )
+        session.add(asset)
+        session.flush()
+        session.add(MediaLocation(
+            media_asset_id=asset.id, relative_path="Library/Videos/override.mp4",
+            status="available", provenance_type="local_import", file_size_bytes=video_path.stat().st_size,
+        ))
+        session.commit()
+        asset_id = asset.id
+    with pytest.raises(ProducerWorkflowError, match="currently prefers an image"):
+        service.select_asset(workspace["workspace_id"], beat["id"], asset_id)
+    service.select_asset(workspace["workspace_id"], beat["id"], asset_id, override_media_preference=True)
+    service.update_beat_requirements(
+        workspace["workspace_id"], beat["id"], media_preference="video", source_requirement="exact"
+    )
+    refreshed = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    assert refreshed["beats"][0]["selected"]["asset_id"] == asset_id
+    assert refreshed["beats"][0]["specification"]["media_preference"] == "video"
+    assert refreshed["beats"][0]["specification"]["source_requirement"] == "exact"
+    with Session(engine) as session:
+        assert session.get(ProducerWorkspace, workspace["workspace_id"]).plan_json["beats"][0]["media_preference"] == "image"
+    storyboard = service.generate_storyboard(workspace["workspace_id"])
+    assert b"video / exact" in Path(storyboard["storyboard_path"]).read_bytes()
+    engine.dispose()
 
 
 def test_edit_folder_order_fallback_and_storyboard_with_unselected_beat(

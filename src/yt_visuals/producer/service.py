@@ -9,7 +9,7 @@ import re
 import shutil
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -34,6 +34,7 @@ from ..models import (
     ProducerBeat,
     ProducerBeatHiddenAsset,
     ProducerWorkspace,
+    VideoRelease,
 )
 from ..providers.base import MediaProvider as ProviderClient
 from ..providers.base import MediaSearchResult
@@ -148,8 +149,8 @@ class ProducerWorkflowService:
             rows = list(
                 session.scalars(
                     select(ProducerWorkspace)
-                    .options(selectinload(ProducerWorkspace.beats))
-                    .order_by(ProducerWorkspace.updated_at.desc())
+                    .options(selectinload(ProducerWorkspace.beats), selectinload(ProducerWorkspace.video_release))
+                    .order_by(ProducerWorkspace.status, ProducerWorkspace.updated_at.desc())
                 )
             )
             return [
@@ -159,12 +160,20 @@ class ProducerWorkflowService:
                     "title": row.title,
                     "selected": sum(1 for beat in row.beats if beat.selected_asset_id),
                     "total": len(row.beats),
+                    "status": row.status,
+                    "release": self._release_view(row.video_release),
+                    "release_position": row.release_position,
                 }
                 for row in rows
             ]
 
     def get_workspace(
-        self, workspace_id: str, *, include_candidates: bool = True
+        self,
+        workspace_id: str,
+        *,
+        include_candidates: bool = True,
+        local_query: str = "",
+        local_beat_id: str | None = None,
     ) -> dict[str, Any]:
         with Session(self.engine) as session:
             workspace = session.scalar(
@@ -173,6 +182,8 @@ class ProducerWorkflowService:
                 .options(
                     selectinload(ProducerWorkspace.beats).selectinload(
                         ProducerBeat.hidden_assets
+                    ), selectinload(ProducerWorkspace.video_release).selectinload(
+                        VideoRelease.workspaces
                     )
                 )
             )
@@ -194,6 +205,9 @@ class ProducerWorkflowService:
                 "story_id": workspace.story_external_id,
                 "title": workspace.title,
                 "status": workspace.status,
+                "release": self._release_view(workspace.video_release),
+                "release_position": workspace.release_position,
+                "release_count": len(workspace.video_release.workspaces) if workspace.video_release else 0,
                 "edit_folder": str(self.edit_folder(workspace.story_external_id)),
                 "storyboard": self._storyboard_view(workspace.story_external_id),
                 "selected": sum(1 for row in rows if row["selected_asset_id"]),
@@ -201,6 +215,7 @@ class ProducerWorkflowService:
                 "beats": rows,
             }
 
+        reuse_groups = self._reuse_groups(workspace_id, result["release"])
         for beat in result["beats"]:
             selected_id = beat.pop("selected_asset_id")
             beat["selected"] = (
@@ -208,12 +223,203 @@ class ProducerWorkflowService:
                 if selected_id is not None
                 else None
             )
+            is_search_target = bool(local_query and local_beat_id == beat["id"])
             beat["candidates"] = (
-                self.list_candidates(workspace_id, beat["id"], limit=3)
+                []
+                if is_search_target
+                else self.list_candidates(workspace_id, beat["id"], limit=3)
                 if include_candidates
                 else []
             )
+            beat["existing_search"] = self.search_existing_media(local_query) if is_search_target else []
+            displayed = {
+                item["asset_id"] for item in beat["candidates"] + beat["existing_search"]
+            }
+            beat["reuse"] = self._reuse_for_beat(
+                reuse_groups, beat["id"], displayed_asset_ids=displayed
+            )
         return result
+
+    @staticmethod
+    def _release_view(release: VideoRelease | None) -> dict[str, Any] | None:
+        return (
+            {
+                "id": release.id,
+                "name": release.name,
+                "status": release.status,
+                "release_date": release.release_date.isoformat() if release.release_date else None,
+            }
+            if release
+            else None
+        )
+
+    def workspace_buckets(self, *, show_finished: bool = False) -> dict[str, list[dict[str, Any]]]:
+        buckets = {"planned": [], "in_production": [], "completed": []}
+        for workspace in self.list_workspaces():
+            if workspace["status"] == "completed" and not show_finished:
+                continue
+            buckets[workspace["status"]].append(workspace)
+        return buckets
+
+    def list_releases(self, *, show_released: bool = True) -> list[dict[str, Any]]:
+        with Session(self.engine) as session:
+            releases = list(
+                session.scalars(
+                    select(VideoRelease).options(
+                        selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.beats)
+                    )
+                )
+            )
+            if not show_released:
+                releases = [item for item in releases if item.status != "released"]
+            releases.sort(key=self._release_sort_key)
+            return [self._release_detail(release) for release in releases]
+
+    def get_release(self, release_id: str) -> dict[str, Any]:
+        with Session(self.engine) as session:
+            release = session.scalar(select(VideoRelease).where(VideoRelease.id == release_id).options(selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.beats)))
+            if release is None:
+                raise ProducerWorkflowError("video release was not found")
+            return self._release_detail(release)
+
+    @staticmethod
+    def _release_sort_key(release: VideoRelease) -> tuple[Any, ...]:
+        # Active dated releases are nearest first; active undated releases follow.
+        # Released history is always last and is newest-first when dated.
+        if release.status != "released":
+            return (0, release.release_date is None, release.release_date or date.max, release.name.casefold())
+        return (1, release.release_date is None, -(release.release_date.toordinal() if release.release_date else 0), release.name.casefold())
+
+    @staticmethod
+    def _release_detail(release: VideoRelease) -> dict[str, Any]:
+        stories = sorted(release.workspaces, key=lambda item: (item.release_position or 999999, item.created_at, item.id))
+        return {
+            "id": release.id,
+            "name": release.name,
+            "status": release.status,
+            "release_date": release.release_date.isoformat() if release.release_date else None,
+            "workspaces": [{"workspace_id": item.id, "title": item.title, "story_id": item.story_external_id, "status": item.status, "position": item.release_position, "selected": sum(1 for beat in item.beats if beat.selected_asset_id), "total": len(item.beats)} for item in stories],
+        }
+
+    def create_release(self, name: str) -> dict[str, Any]:
+        clean = name.strip()
+        if not clean:
+            raise ProducerWorkflowError("release name is required")
+        with Session(self.engine) as session:
+            if session.scalar(select(VideoRelease).where(func.lower(VideoRelease.name) == clean.casefold())):
+                raise ProducerWorkflowError("a video release with that name already exists")
+            release = VideoRelease(id=str(uuid.uuid4()), name=clean)
+            session.add(release); session.commit()
+            return self._release_view(release) or {}
+
+    def rename_release(self, release_id: str, name: str) -> None:
+        clean = name.strip()
+        if not clean: raise ProducerWorkflowError("release name is required")
+        with Session(self.engine) as session:
+            release = session.get(VideoRelease, release_id)
+            if release is None: raise ProducerWorkflowError("video release was not found")
+            duplicate = session.scalar(select(VideoRelease).where(func.lower(VideoRelease.name) == clean.casefold(), VideoRelease.id != release_id))
+            if duplicate: raise ProducerWorkflowError("a video release with that name already exists")
+            release.name = clean; session.commit()
+
+    def update_release_metadata(
+        self, release_id: str, *, status: str, release_date: str | None
+    ) -> None:
+        if status not in {"planned", "in_production", "released"}:
+            raise ProducerWorkflowError("invalid video release status")
+        try:
+            parsed_date = date.fromisoformat(release_date) if release_date else None
+        except ValueError as exc:
+            raise ProducerWorkflowError("release date must be a valid date") from exc
+        with Session(self.engine) as session:
+            release = session.get(VideoRelease, release_id)
+            if release is None:
+                raise ProducerWorkflowError("video release was not found")
+            release.status = status
+            release.release_date = parsed_date
+            session.commit()
+
+    def delete_release(self, release_id: str) -> None:
+        with Session(self.engine) as session:
+            release = session.scalar(select(VideoRelease).where(VideoRelease.id == release_id).options(selectinload(VideoRelease.workspaces)))
+            if release is None: raise ProducerWorkflowError("video release was not found")
+            if release.workspaces: raise ProducerWorkflowError(f"Release still contains {len(release.workspaces)} workspaces. Unassign them before deleting the release.")
+            session.delete(release); session.commit()
+
+    def update_workspace_status(self, workspace_id: str, status: str) -> None:
+        if status not in {"planned", "in_production", "completed"}: raise ProducerWorkflowError("invalid workspace status")
+        with Session(self.engine) as session:
+            workspace = session.get(ProducerWorkspace, workspace_id)
+            if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
+            workspace.status = status; session.commit()
+
+    def rename_workspace_title(self, workspace_id: str, title: str) -> None:
+        clean = title.strip()
+        if not clean:
+            raise ProducerWorkflowError("story title is required")
+        with Session(self.engine) as session:
+            workspace = session.get(ProducerWorkspace, workspace_id)
+            if workspace is None:
+                raise ProducerWorkflowError("producer workspace was not found")
+            workspace.title = clean
+            session.commit()
+
+    def update_beat_requirements(
+        self, workspace_id: str, beat_id: str, *, media_preference: str, source_requirement: str
+    ) -> None:
+        if media_preference not in {"image", "video", "either"}:
+            raise ProducerWorkflowError("invalid media preference")
+        if source_requirement not in {"representative", "exact"}:
+            raise ProducerWorkflowError("invalid source requirement")
+        with Session(self.engine) as session:
+            beat = self._session_beat(session, workspace_id, beat_id)
+            specification = dict(beat.specification_json)
+            specification["media_preference"] = media_preference
+            specification["source_requirement"] = source_requirement
+            beat.specification_json = specification
+            session.commit()
+
+    def assign_workspace_release(self, workspace_id: str, release_id: str | None) -> None:
+        with Session(self.engine) as session:
+            workspace = session.get(ProducerWorkspace, workspace_id)
+            if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
+            if not release_id:
+                workspace.video_release_id = None; workspace.release_position = None; session.commit(); return
+            release = session.get(VideoRelease, release_id)
+            if release is None: raise ProducerWorkflowError("video release was not found")
+            if workspace.video_release_id != release_id:
+                maximum = session.scalar(select(func.max(ProducerWorkspace.release_position)).where(ProducerWorkspace.video_release_id == release_id)) or 0
+                workspace.video_release_id = release_id; workspace.release_position = maximum + 1
+            session.commit()
+
+    def move_workspace_release_position(self, workspace_id: str, direction: int) -> None:
+        with Session(self.engine) as session:
+            workspace = session.get(ProducerWorkspace, workspace_id)
+            if workspace is None or not workspace.video_release_id: raise ProducerWorkflowError("workspace is not assigned to a video release")
+            rows = list(session.scalars(select(ProducerWorkspace).where(ProducerWorkspace.video_release_id == workspace.video_release_id).order_by(ProducerWorkspace.release_position, ProducerWorkspace.created_at)))
+            index = next(i for i, item in enumerate(rows) if item.id == workspace_id)
+            target = index + direction
+            if 0 <= target < len(rows): rows[index], rows[target] = rows[target], rows[index]
+            for position, item in enumerate(rows, 1): item.release_position = position
+            session.commit()
+
+    def delete_workspace(self, workspace_id: str) -> str:
+        with Session(self.engine) as session:
+            workspace = session.get(ProducerWorkspace, workspace_id)
+            if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
+            story_id = workspace.story_external_id
+        projects_root = (self.settings.root / "Projects").resolve()
+        target = (projects_root / story_id).resolve()
+        if target == projects_root or projects_root not in target.parents: raise ProducerWorkflowError("workspace project path is unsafe")
+        try:
+            if target.exists(): shutil.rmtree(target)
+        except OSError as exc:
+            raise ProducerWorkflowError("workspace project files could not be deleted; the workspace was kept") from exc
+        with Session(self.engine) as session:
+            workspace = session.get(ProducerWorkspace, workspace_id)
+            if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
+            session.delete(workspace); session.commit()
+        return story_id
 
     def list_candidates(
         self, workspace_id: str, beat_id: str, *, limit: int = 3
@@ -242,6 +448,75 @@ class ProducerWorkflowService:
             for item in merged
         ]
 
+    def search_existing_media(self, query: str, *, limit: int = 12) -> list[dict[str, Any]]:
+        response = self.catalog.search_media(
+            SearchMediaRequest(query=query.strip(), media_type=None, limit=limit)
+        )
+        return [
+            self._candidate_view(item, self.catalog.get_asset_detail(item.asset_id))
+            for item in response.candidates
+        ]
+
+    def _reuse_groups(
+        self, workspace_id: str, release: dict[str, Any] | None
+    ) -> dict[str, list[dict[str, Any]]]:
+        with Session(self.engine) as session:
+            rows = list(
+                session.execute(
+                    select(ProducerBeat, ProducerWorkspace)
+                    .join(ProducerWorkspace, ProducerBeat.workspace_id == ProducerWorkspace.id)
+                    .where(ProducerBeat.selected_asset_id.is_not(None))
+                    .order_by(ProducerBeat.selected_at.desc(), ProducerBeat.updated_at.desc())
+                )
+            )
+        contexts: dict[int, list[dict[str, Any]]] = {}
+        recent_ids: list[int] = []
+        story_ids: list[int] = []
+        release_ids: list[int] = []
+        for beat, workspace in rows:
+            asset_id = beat.selected_asset_id
+            if asset_id is None:
+                continue
+            context = {
+                "beat_db_id": beat.id,
+                "beat_id": beat.external_beat_id,
+                "story_id": workspace.story_external_id,
+                "story_title": workspace.title,
+            }
+            contexts.setdefault(asset_id, []).append(context)
+            if asset_id not in recent_ids:
+                recent_ids.append(asset_id)
+            if workspace.id == workspace_id and asset_id not in story_ids:
+                story_ids.append(asset_id)
+            if release and workspace.video_release_id == release["id"] and workspace.id != workspace_id and asset_id not in release_ids:
+                release_ids.append(asset_id)
+
+        def views(asset_ids: list[int], limit: int = 6) -> list[dict[str, Any]]:
+            result: list[dict[str, Any]] = []
+            for asset_id in asset_ids[:limit]:
+                view = self._asset_view(self.catalog.get_asset_detail(asset_id))
+                view["used_in"] = contexts[asset_id]
+                result.append(view)
+            return result
+
+        return {"recent": views(recent_ids), "story": views(story_ids), "release": views(release_ids)}
+
+    @staticmethod
+    def _reuse_for_beat(
+        groups: dict[str, list[dict[str, Any]]], beat_id: str, *, displayed_asset_ids: set[int]
+    ) -> dict[str, list[dict[str, Any]]]:
+        result: dict[str, list[dict[str, Any]]] = {}
+        seen = set(displayed_asset_ids)
+        for group in ("release", "story", "recent"):
+            result[group] = []
+            for asset in groups[group]:
+                contexts = [item for item in asset["used_in"] if item["beat_db_id"] != beat_id]
+                if not contexts or asset["asset_id"] in seen:
+                    continue
+                result[group].append({**asset, "used_in": contexts})
+                seen.add(asset["asset_id"])
+        return result
+
     def select_asset(
         self,
         workspace_id: str,
@@ -249,6 +524,7 @@ class ProducerWorkflowService:
         asset_id: int,
         *,
         rebuild_edit: bool = True,
+        override_media_preference: bool = False,
     ) -> None:
         detail = self.catalog.get_asset_detail(asset_id)
         if not detail.available or not detail.sha256:
@@ -257,9 +533,14 @@ class ProducerWorkflowService:
             beat = self._session_beat(session, workspace_id, beat_id)
             preference = beat.specification_json["media_preference"]
             if preference != "either" and detail.media_type != preference:
-                raise ProducerWorkflowError(
-                    f"this beat requires {preference} media, not {detail.media_type}"
-                )
+                if not override_media_preference:
+                    raise ProducerWorkflowError(
+                        f"This beat currently prefers an {preference}, but the selected asset is a {detail.media_type}. "
+                        f"Change the beat requirement below or choose ‘Use & set {detail.media_type}’."
+                    )
+                specification = dict(beat.specification_json)
+                specification["media_preference"] = detail.media_type
+                beat.specification_json = specification
             beat.selected_asset_id = detail.asset_id
             beat.selected_asset_sha256 = detail.sha256
             beat.selected_at = datetime.now(timezone.utc)

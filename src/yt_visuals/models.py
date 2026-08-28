@@ -678,25 +678,47 @@ class AssetReviewAnnotation(TimestampMixin, Base):
 class ProducerWorkspace(TimestampMixin, Base):
     __tablename__ = "producer_workspaces"
     __table_args__ = (
-        CheckConstraint("status IN ('active', 'complete')", name="status"),
+        CheckConstraint("status IN ('planned', 'in_production', 'completed')", name="status"),
         CheckConstraint("length(trim(story_external_id)) > 0", name="story_external_id_not_empty"),
         CheckConstraint("length(trim(title)) > 0", name="title_not_empty"),
         CheckConstraint("length(plan_document_sha256) = 64", name="plan_sha256_length"),
+        Index("ix_producer_workspaces_release_position", "video_release_id", "release_position"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     story_external_id: Mapped[str] = mapped_column(
-        String(128, collation="NOCASE"), nullable=False, unique=True
+        String(128, collation="NOCASE"), nullable=False
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     plan_document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     plan_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="active", server_default="active"
+        String(16), nullable=False, default="in_production", server_default="in_production"
     )
+    video_release_id: Mapped[str | None] = mapped_column(
+        ForeignKey("video_releases.id", ondelete="RESTRICT"), nullable=True
+    )
+    release_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     beats: Mapped[list["ProducerBeat"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan", order_by="ProducerBeat.sequence"
+    )
+    video_release: Mapped["VideoRelease | None"] = relationship(back_populates="workspaces")
+
+
+class VideoRelease(TimestampMixin, Base):
+    __tablename__ = "video_releases"
+    __table_args__ = (CheckConstraint("length(trim(name)) > 0", name="name_not_empty"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255, collation="NOCASE"), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="planned", server_default="planned"
+    )
+    release_date: Mapped[date | None] = mapped_column(Date)
+    workspaces: Mapped[list["ProducerWorkspace"]] = relationship(
+        back_populates="video_release",
+        order_by="ProducerWorkspace.release_position",
     )
 
 

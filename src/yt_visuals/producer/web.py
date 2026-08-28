@@ -54,7 +54,44 @@ def create_app(
 
     @app.get("/")
     def index() -> str:
-        return render_template("index.html", workspaces=service.list_workspaces())
+        show_finished = request.args.get("show_finished") == "1"
+        return render_template(
+            "index.html",
+            buckets=service.workspace_buckets(show_finished=show_finished),
+            releases=service.list_releases(show_released=show_finished),
+            show_finished=show_finished,
+            show_import=request.args.get("import_plan") == "1",
+        )
+
+    @app.get("/releases/<release_id>")
+    def release_detail(release_id: str) -> str:
+        return render_template("release.html", release=service.get_release(release_id))
+
+    @app.post("/releases")
+    def create_release():
+        release = service.create_release(request.form.get("name", ""))
+        flash("Video release created.", "success")
+        return redirect(url_for("release_detail", release_id=release["id"]))
+
+    @app.post("/releases/<release_id>/rename")
+    def rename_release(release_id: str):
+        service.rename_release(release_id, request.form.get("name", "")); flash("Video release renamed.", "success")
+        return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.post("/releases/<release_id>/metadata")
+    def update_release_metadata(release_id: str):
+        service.update_release_metadata(
+            release_id,
+            status=request.form.get("status", ""),
+            release_date=request.form.get("release_date") or None,
+        )
+        flash("Video release details updated.", "success")
+        return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.post("/releases/<release_id>/delete")
+    def delete_release(release_id: str):
+        service.delete_release(release_id); flash("Empty video release deleted.", "success")
+        return redirect(url_for("index"))
 
     @app.get("/settings/integrations")
     def integrations() -> str:
@@ -108,13 +145,13 @@ def create_app(
         upload = request.files.get("visual_plan")
         if upload is None or not upload.filename:
             flash("Choose a Visual Plan JSON file.", "error")
-            return redirect(url_for("index"))
+            return redirect(url_for("index", import_plan="1"))
         try:
             plan = VisualPlan.model_validate_json(upload.read().decode("utf-8"))
             result = service.import_plan(plan)
         except (UnicodeDecodeError, ValidationError, json.JSONDecodeError) as exc:
             flash(f"Visual Plan validation failed: {_concise(exc)}", "error")
-            return redirect(url_for("index"))
+            return redirect(url_for("index", import_plan="1"))
         flash("Visual Plan opened." if result["idempotent"] else "Visual Plan imported.", "success")
         return redirect(url_for("workspace", workspace_id=result["workspace_id"]))
 
@@ -122,14 +159,23 @@ def create_app(
     def workspace(workspace_id: str) -> str:
         return render_template(
             "workspace.html",
-            workspace=service.get_workspace(workspace_id),
+            workspace=service.get_workspace(
+                workspace_id,
+                local_query=request.args.get("local_query", ""),
+                local_beat_id=request.args.get("local_beat"),
+            ),
             focused_beat=request.args.get("focus"),
-            open_panel=request.args.get("panel"),
+            open_panel=request.args.get("panel"), releases=service.list_releases(),
         )
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/select/<int:asset_id>")
     def select_asset(workspace_id: str, beat_id: str, asset_id: int):
-        service.select_asset(workspace_id, beat_id, asset_id)
+        service.select_asset(
+            workspace_id,
+            beat_id,
+            asset_id,
+            override_media_preference=request.form.get("override_media_preference") == "1",
+        )
         flash("Asset selected for this beat.", "success")
         return _beat_redirect(service, workspace_id, beat_id, panel="local")
 
@@ -138,6 +184,67 @@ def create_app(
         service.clear_selection(workspace_id, beat_id)
         flash("Beat selection cleared.", "success")
         return _beat_redirect(service, workspace_id, beat_id)
+
+    @app.post("/stories/<workspace_id>/organization/status")
+    def update_workspace_status(workspace_id: str):
+        service.update_workspace_status(workspace_id, request.form.get("status", "")); flash("Workspace status updated.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
+
+    @app.post("/stories/<workspace_id>/organization/title")
+    def rename_workspace_title(workspace_id: str):
+        service.rename_workspace_title(workspace_id, request.form.get("title", ""))
+        flash("Story display title updated.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
+
+    @app.post("/stories/<workspace_id>/organization/release")
+    def assign_workspace_release(workspace_id: str):
+        service.assign_workspace_release(workspace_id, request.form.get("release_id") or None); flash("Workspace release assignment updated.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/requirements")
+    def update_beat_requirements(workspace_id: str, beat_id: str):
+        service.update_beat_requirements(
+            workspace_id,
+            beat_id,
+            media_preference=request.form.get("media_preference", ""),
+            source_requirement=request.form.get("source_requirement", ""),
+        )
+        flash("Beat sourcing requirements updated.", "success")
+        return _beat_redirect(service, workspace_id, beat_id, panel="local")
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/search")
+    def search_existing_media(workspace_id: str, beat_id: str):
+        query = request.form.get("local_query", "").strip()
+        if not query:
+            flash("Enter a catalog search term.", "error")
+            return _beat_redirect(service, workspace_id, beat_id, panel="local")
+        if not service.search_existing_media(query):
+            flash("No existing catalog media matched that search.", "error")
+        return redirect(
+            _beat_location(
+                service,
+                workspace_id,
+                beat_id,
+                panel="local",
+                local_query=query,
+                local_beat=beat_id,
+                source="local",
+            )
+        )
+
+    @app.post("/stories/<workspace_id>/organization/order/<direction>")
+    def move_workspace_release(workspace_id: str, direction: str):
+        service.move_workspace_release_position(workspace_id, -1 if direction == "up" else 1); flash("Release story order updated.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
+
+    @app.post("/stories/<workspace_id>/delete")
+    def delete_workspace(workspace_id: str):
+        workspace = service.get_workspace(workspace_id, include_candidates=False)
+        if request.form.get("confirm") != workspace["story_id"]:
+            raise ProducerWorkflowError("type the story ID to confirm workspace deletion")
+        deleted = service.delete_workspace(workspace_id)
+        flash(f"Workspace {deleted} and its project files were deleted. Master Library assets were kept.", "success")
+        return redirect(url_for("index"))
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/hide/<int:asset_id>")
     def hide_asset(workspace_id: str, beat_id: str, asset_id: int):
@@ -276,6 +383,7 @@ def _beat_location(
     beat_id: str,
     *,
     panel: str | None = None,
+    **query: str,
 ) -> str:
     anchor = service.beat_anchor(workspace_id, beat_id)
     return url_for(
@@ -284,6 +392,7 @@ def _beat_location(
         focus=anchor,
         panel=panel,
         _anchor=anchor,
+        **query,
     )
 
 
@@ -300,6 +409,7 @@ def _error_target(service: ProducerWorkflowService) -> str:
                 "select_asset": "local",
                 "hide_asset": "local",
                 "restore_asset": "local",
+                "search_existing_media": "local",
             }
             return _beat_location(
                 service,
