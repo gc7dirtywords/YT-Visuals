@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+Data
+Library
+Projects
+Releases
+Temp
+Tools
+.env
+*.sqlite3
+*.bak

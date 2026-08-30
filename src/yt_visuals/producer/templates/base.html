@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='producer.css') }}">
     <script src="{{ url_for('static', filename='producer.js') }}" defer></script>
   </head>
-  <body>
+  <body{% if server_mode %} class="server-mode"{% endif %}>
     <header class="topbar">
       <a class="brand" href="{{ url_for('index') }}">YT‑ChannelOps</a>
       <nav class="topnav">

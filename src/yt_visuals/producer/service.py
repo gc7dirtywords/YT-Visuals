@@ -5,6 +5,7 @@ import hashlib
 import html
 import ipaddress
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..acquisition import AcquisitionService, YT_VISUALS_USER_AGENT
+from ..acquisition import probe_media_file
 from ..config import Settings
 from ..library import LibraryScanner
 from ..library.inspection import (
@@ -39,6 +41,7 @@ from ..models import (
     ProducerBeatHiddenAsset,
     ProducerWorkspace,
     ReleasePresentationRevision,
+    ReleaseProductionArtifactVersion,
     StoryDocumentVersion,
     VideoRelease,
 )
@@ -91,6 +94,11 @@ DOCUMENT_MIME_TYPES = {
     ".odt": "application/vnd.oasis.opendocument.text",
     ".csv": "text/csv; charset=utf-8",
     ".md": "text/markdown; charset=utf-8",
+}
+RELEASE_ARTIFACT_EXTENSIONS = {
+    "resolve_project": frozenset({".drp", ".zip"}),
+    "final_render": frozenset({".mp4", ".mov"}),
+    "other": frozenset({".pdf", ".txt", ".md", ".zip"}),
 }
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 
@@ -577,7 +585,7 @@ class ProducerWorkflowService:
             return after
 
     def story_documents_folder(self, story_id: str) -> Path:
-        projects_root = self.settings.root / "Projects"
+        projects_root = self.settings.projects_root
         path = projects_root / story_id / "Documents"
         _assert_within(path, projects_root)
         return path
@@ -791,6 +799,7 @@ class ProducerWorkflowService:
                     selectinload(VideoRelease.presentation_revisions).selectinload(
                         ReleasePresentationRevision.thumbnail_asset
                     ),
+                    selectinload(VideoRelease.production_artifacts),
                 )
             )
             if release is None:
@@ -825,7 +834,80 @@ class ProducerWorkflowService:
             "workspaces": [{"workspace_id": item.id, "title": item.title, "story_id": item.story_external_id, "status": item.status, "position": item.release_position, "selected": sum(1 for beat in item.beats if beat.selected_asset_id), "total": len(item.beats)} for item in stories],
             "presentation": cls._presentation_view(revisions[0]) if revisions else None,
             "presentation_history": [cls._presentation_view(item) for item in revisions],
+            "artifacts": cls._artifact_groups(release.production_artifacts),
         }
+
+    @classmethod
+    def _artifact_groups(cls, artifacts: list[ReleaseProductionArtifactVersion]) -> list[dict[str, Any]]:
+        result = []
+        for artifact_type in ("resolve_project", "final_render", "other"):
+            versions = sorted((cls._artifact_view(item) for item in artifacts if item.artifact_type == artifact_type), key=lambda item: item["version"], reverse=True)
+            result.append({"artifact_type": artifact_type, "label": artifact_type.replace("_", " ").title(), "current": versions[0] if versions else None, "versions": versions, "allowed_extensions": sorted(RELEASE_ARTIFACT_EXTENSIONS[artifact_type])})
+        return result
+
+    @staticmethod
+    def _artifact_view(item: ReleaseProductionArtifactVersion) -> dict[str, Any]:
+        return {"id": item.id, "artifact_type": item.artifact_type, "version": item.version, "original_filename": item.original_filename, "stored_filename": item.stored_filename, "sha256": item.sha256, "mime_type": item.mime_type, "file_size_bytes": item.file_size_bytes, "technical_metadata": item.technical_metadata or {}, "uploaded_at": item.uploaded_at.isoformat()}
+
+    def release_artifacts_folder(self, release_id: str) -> Path:
+        path = self.settings.releases_root / release_id
+        _assert_within(path, self.settings.releases_root)
+        return path
+
+    def upload_release_artifact(self, release_id: str, artifact_type: str, source_path: Path, original_filename: str) -> dict[str, Any]:
+        if artifact_type not in RELEASE_ARTIFACT_EXTENSIONS:
+            raise ProducerWorkflowError("unsupported release artifact type")
+        filename = _clean_document_filename(original_filename)
+        extension = Path(filename).suffix.casefold()
+        if extension not in RELEASE_ARTIFACT_EXTENSIONS[artifact_type]:
+            raise ProducerWorkflowError(f"{artifact_type.replace('_', ' ')} accepts only: {', '.join(sorted(RELEASE_ARTIFACT_EXTENSIONS[artifact_type]))}")
+        try:
+            size = source_path.stat().st_size
+        except OSError as exc:
+            raise ProducerWorkflowError("uploaded release artifact could not be read") from exc
+        if not 0 < size <= self.settings.max_release_artifact_upload_bytes:
+            raise ProducerWorkflowError("uploaded release artifact is empty or exceeds the configured upload limit")
+        digest = _file_sha256(source_path)
+        metadata: dict[str, Any] | None = None
+        if artifact_type == "final_render":
+            probe = probe_media_file(source_path)
+            if probe.warning:
+                raise ProducerWorkflowError(f"final render validation failed: {probe.warning}")
+            metadata = {"duration_ms": probe.duration_ms, "width": probe.width, "height": probe.height, "container": probe.container, "ffprobe": probe.raw_metadata}
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        with Session(self.engine) as session:
+            release = session.scalar(select(VideoRelease).where(VideoRelease.id == release_id).options(selectinload(VideoRelease.production_artifacts)))
+            if release is None:
+                raise ProducerWorkflowError("video release was not found")
+            existing = [item for item in release.production_artifacts if item.artifact_type == artifact_type]
+            previous = self._artifact_view(max(existing, key=lambda item: item.version)) if existing else None
+            version = max((item.version for item in existing), default=0) + 1
+            stored = f"{artifact_type}-v{version:04d}-{_safe_label(Path(filename).stem, fallback='artifact')[:72]}-{digest[:12]}{extension}"
+            root = self.release_artifacts_folder(release.id); root.mkdir(parents=True, exist_ok=True)
+            destination = root / stored; _assert_within(destination, root)
+            try:
+                with source_path.open("rb") as source, destination.open("xb") as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+            except OSError as exc:
+                destination.unlink(missing_ok=True)
+                raise ProducerWorkflowError("uploaded release artifact could not be stored") from exc
+            artifact = ReleaseProductionArtifactVersion(id=str(uuid.uuid4()), video_release_id=release.id, artifact_type=artifact_type, version=version, original_filename=filename, stored_filename=stored, sha256=digest, mime_type=mime_type, file_size_bytes=size, technical_metadata=metadata, uploaded_at=datetime.now(timezone.utc))
+            session.add(artifact)
+            after = self._artifact_view(artifact)
+            self._record_event(session, "release", release.id, "release.artifact_replaced" if previous else "release.artifact_uploaded", before=previous, after=after)
+            try: session.commit()
+            except Exception:
+                destination.unlink(missing_ok=True); raise
+            return after
+
+    def release_artifact_path(self, release_id: str, artifact_id: str) -> tuple[Path, dict[str, Any]]:
+        with Session(self.engine) as session:
+            artifact = session.scalar(select(ReleaseProductionArtifactVersion).where(ReleaseProductionArtifactVersion.id == artifact_id, ReleaseProductionArtifactVersion.video_release_id == release_id))
+            if artifact is None: raise ProducerWorkflowError("release artifact version was not found")
+            if Path(artifact.stored_filename).name != artifact.stored_filename: raise ProducerWorkflowError("stored release artifact path is unsafe")
+            root = self.release_artifacts_folder(release_id); path = root / artifact.stored_filename; _assert_within(path, root); view = self._artifact_view(artifact)
+        if not path.is_file(): raise ProducerWorkflowError("stored release artifact file is missing")
+        return path, view
 
     @staticmethod
     def _presentation_view(revision: ReleasePresentationRevision) -> dict[str, Any]:
@@ -1010,9 +1092,10 @@ class ProducerWorkflowService:
 
     def delete_release(self, release_id: str) -> None:
         with Session(self.engine) as session:
-            release = session.scalar(select(VideoRelease).where(VideoRelease.id == release_id).options(selectinload(VideoRelease.workspaces), selectinload(VideoRelease.presentation_revisions)))
+            release = session.scalar(select(VideoRelease).where(VideoRelease.id == release_id).options(selectinload(VideoRelease.workspaces), selectinload(VideoRelease.presentation_revisions), selectinload(VideoRelease.production_artifacts)))
             if release is None: raise ProducerWorkflowError("video release was not found")
             if release.workspaces: raise ProducerWorkflowError(f"Release still contains {len(release.workspaces)} workspaces. Unassign them before deleting the release.")
+            if release.production_artifacts: raise ProducerWorkflowError("Release has retained production artifacts and cannot be deleted.")
             if release.status != "planned":
                 raise ProducerWorkflowError("only an unused planned release may be deleted")
             if release.presentation_revisions:
@@ -2140,6 +2223,16 @@ class ProducerWorkflowService:
             raise ProducerWorkflowError("generate the storyboard before opening it")
         return path
 
+    def edit_handoff_path(self, workspace_id: str, filename: str) -> Path:
+        if filename not in {"manifest.csv", "edit_plan.json", "storyboard.pdf"}:
+            raise ProducerWorkflowError("requested handoff artifact is not available")
+        workspace = self.get_workspace(workspace_id, include_candidates=False)
+        path = self.edit_folder(workspace["story_id"]) / filename
+        _assert_within(path, self.settings.projects_root)
+        if not path.is_file():
+            raise ProducerWorkflowError("requested handoff artifact has not been generated")
+        return path
+
     def open_storyboard(
         self, workspace_id: str, *, opener: Callable[[str], Any] | None = None
     ) -> str:
@@ -2155,7 +2248,7 @@ class ProducerWorkflowService:
         return str(path)
 
     def edit_folder(self, story_id: str) -> Path:
-        return self.settings.root / "Projects" / story_id / "Edit"
+        return self.settings.projects_root / story_id / "Edit"
 
     def open_edit_folder(
         self, workspace_id: str, *, opener: Callable[[str], Any] | None = None

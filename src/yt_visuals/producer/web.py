@@ -44,6 +44,7 @@ def create_app(
         settings.max_image_download_bytes,
         settings.max_video_download_bytes,
         settings.max_audio_download_bytes,
+        settings.max_release_artifact_upload_bytes,
     )
     app.extensions["yt_visuals_engine"] = engine
     app.extensions["yt_visuals_engine_owned"] = owned_engine
@@ -52,7 +53,16 @@ def create_app(
 
     @app.context_processor
     def integration_context() -> dict[str, Any]:
-        return {"pexels_status": credential_store.pexels_status()}
+        return {"pexels_status": credential_store.pexels_status(), "server_mode": settings.server_mode}
+
+    @app.get("/health")
+    def health():
+        try:
+            with engine.connect() as connection:
+                connection.exec_driver_sql("SELECT 1")
+        except Exception:
+            return {"status": "unhealthy"}, 503
+        return {"status": "ok"}
 
     @app.get("/")
     def index() -> str:
@@ -156,7 +166,7 @@ def create_app(
         upload = request.files.get("thumbnail_file")
         if upload is None or not upload.filename:
             raise ProducerWorkflowError("choose an image file to upload as the thumbnail")
-        upload_dir = settings.root / "Temp" / "producer-uploads"
+        upload_dir = settings.temp_root / "producer-uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         suffix = Path(upload.filename).suffix.lower()
         temporary_path = upload_dir / f"{uuid.uuid4()}{suffix}"
@@ -172,6 +182,33 @@ def create_app(
             "success",
         )
         return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.post("/releases/<release_id>/artifacts")
+    def upload_release_artifact(release_id: str):
+        upload = request.files.get("artifact_file")
+        if upload is None or not upload.filename:
+            raise ProducerWorkflowError("choose a release production artifact to upload")
+        upload_dir = settings.temp_root / "producer-uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(upload.filename.replace("\\", "/")).suffix.casefold()
+        temporary_path = upload_dir / f"{uuid.uuid4()}{suffix}"
+        try:
+            upload.save(temporary_path)
+            artifact = service.upload_release_artifact(release_id, request.form.get("artifact_type", ""), temporary_path, Path(upload.filename).name)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        flash(f"Release artifact stored as version {artifact['version']}.", "success")
+        return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.get("/releases/<release_id>/artifacts/<artifact_id>/download")
+    def download_release_artifact(release_id: str, artifact_id: str):
+        path, artifact = service.release_artifact_path(release_id, artifact_id)
+        return send_file(path, mimetype=artifact["mime_type"], as_attachment=True, download_name=artifact["original_filename"], conditional=True)
+
+    @app.get("/releases/<release_id>/artifacts/<artifact_id>/view")
+    def view_release_artifact(release_id: str, artifact_id: str):
+        path, artifact = service.release_artifact_path(release_id, artifact_id)
+        return send_file(path, mimetype=artifact["mime_type"], as_attachment=artifact["artifact_type"] != "final_render", download_name=artifact["original_filename"], conditional=True)
 
     @app.get("/settings/integrations")
     def integrations() -> str:
@@ -419,7 +456,7 @@ def create_app(
         upload = request.files.get("story_document")
         if upload is None or not upload.filename:
             raise ProducerWorkflowError("choose a story document to upload")
-        upload_dir = settings.root / "Temp" / "producer-uploads"
+        upload_dir = settings.temp_root / "producer-uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         suffix = Path(upload.filename.replace("\\", "/")).suffix.casefold()
         temporary_path = upload_dir / f"{uuid.uuid4()}{suffix}"
@@ -537,7 +574,7 @@ def create_app(
         upload = request.files.get("media_file")
         if upload is None or not upload.filename:
             raise ProducerWorkflowError("choose an image or video file to upload")
-        upload_dir = settings.root / "Temp" / "producer-uploads"
+        upload_dir = settings.temp_root / "producer-uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         suffix = Path(upload.filename).suffix.lower()
         temporary_path = upload_dir / f"{uuid.uuid4()}{suffix}"
@@ -556,7 +593,7 @@ def create_app(
         upload = request.files.get("sfx_file")
         if upload is None or not upload.filename:
             raise ProducerWorkflowError("choose a WAV, MP3, or FLAC file to upload")
-        upload_dir = settings.root / "Temp" / "producer-uploads"
+        upload_dir = settings.temp_root / "producer-uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         suffix = Path(upload.filename).suffix.lower()
         temporary_path = upload_dir / f"{uuid.uuid4()}{suffix}"
@@ -623,6 +660,12 @@ def create_app(
             as_attachment=False,
             conditional=True,
         )
+
+    @app.get("/stories/<workspace_id>/edit/<filename>")
+    def download_edit_handoff(workspace_id: str, filename: str):
+        path = service.edit_handoff_path(workspace_id, filename)
+        mimetype = {"manifest.csv": "text/csv", "edit_plan.json": "application/json", "storyboard.pdf": "application/pdf"}[filename]
+        return send_file(path, mimetype=mimetype, as_attachment=filename != "storyboard.pdf", download_name=filename, conditional=True)
 
     @app.get("/media/<int:asset_id>")
     def media(asset_id: int):

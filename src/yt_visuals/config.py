@@ -10,6 +10,7 @@ from .credentials import resolve_pexels_api_key
 DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES = 500 * 1024 * 1024
 DEFAULT_MAX_AUDIO_DOWNLOAD_BYTES = 100 * 1024 * 1024
+DEFAULT_MAX_RELEASE_ARTIFACT_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 
 EXPECTED_DIRECTORIES = (
@@ -40,7 +41,27 @@ class Settings:
 
     @property
     def data_dir(self) -> Path:
-        return self.root / "Data"
+        return _configured_path("YT_CHANNELOPS_CONFIG_ROOT", self.root / "Data")
+
+    @property
+    def projects_root(self) -> Path:
+        return _configured_path("YT_CHANNELOPS_PROJECTS_ROOT", self.root / "Projects")
+
+    @property
+    def library_root(self) -> Path:
+        return _configured_path("YT_CHANNELOPS_LIBRARY_ROOT", self.root / "Library")
+
+    @property
+    def releases_root(self) -> Path:
+        return _configured_path("YT_CHANNELOPS_RELEASES_ROOT", self.root / "Releases")
+
+    @property
+    def temp_root(self) -> Path:
+        return _configured_path("YT_CHANNELOPS_TEMP_ROOT", self.root / "Temp")
+
+    @property
+    def server_mode(self) -> bool:
+        return os.environ.get("YT_CHANNELOPS_SERVER_MODE", "").strip().casefold() in {"1", "true", "yes"}
 
     @property
     def database_path(self) -> Path:
@@ -79,6 +100,18 @@ class Settings:
         return _positive_env_int(
             "YT_VISUALS_MAX_AUDIO_DOWNLOAD_BYTES", DEFAULT_MAX_AUDIO_DOWNLOAD_BYTES
         )
+
+    @property
+    def max_release_artifact_upload_bytes(self) -> int:
+        return _positive_env_int(
+            "YT_CHANNELOPS_MAX_RELEASE_ARTIFACT_UPLOAD_BYTES",
+            DEFAULT_MAX_RELEASE_ARTIFACT_UPLOAD_BYTES,
+        )
+
+
+def _configured_path(name: str, default: Path) -> Path:
+    value = os.environ.get(name, "").strip()
+    return Path(value).expanduser().resolve() if value else default
 
 
 def _positive_env_int(name: str, default: int) -> int:

@@ -779,6 +779,38 @@ class VideoRelease(TimestampMixin, Base):
         back_populates="video_release",
         order_by="ReleasePresentationRevision.sequence",
     )
+    production_artifacts: Mapped[list["ReleaseProductionArtifactVersion"]] = relationship(
+        back_populates="video_release", cascade="all, delete-orphan",
+        order_by="ReleaseProductionArtifactVersion.version",
+    )
+
+
+class ReleaseProductionArtifactVersion(Base):
+    __tablename__ = "release_production_artifact_versions"
+    __table_args__ = (
+        CheckConstraint("artifact_type IN ('resolve_project', 'final_render', 'other')", name="ck_release_artifact_type"),
+        CheckConstraint("version > 0", name="ck_release_artifact_version_positive"),
+        CheckConstraint("length(trim(original_filename)) > 0", name="ck_release_artifact_original_filename_not_empty"),
+        CheckConstraint("length(trim(stored_filename)) > 0", name="ck_release_artifact_stored_filename_not_empty"),
+        CheckConstraint("length(sha256) = 64", name="ck_release_artifact_sha256_length"),
+        CheckConstraint("sha256 NOT GLOB '*[^0-9a-f]*'", name="ck_release_artifact_sha256_lower_hex"),
+        CheckConstraint("file_size_bytes >= 0", name="ck_release_artifact_file_size_nonnegative"),
+        UniqueConstraint("video_release_id", "artifact_type", "version", name="uq_release_artifact_release_type_version"),
+        UniqueConstraint("video_release_id", "stored_filename", name="uq_release_artifact_release_stored_filename"),
+        Index("ix_release_artifact_release_type_version", "video_release_id", "artifact_type", "version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    video_release_id: Mapped[str] = mapped_column(ForeignKey("video_releases.id", ondelete="CASCADE"), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    stored_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(127), nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    technical_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.current_timestamp())
+    video_release: Mapped[VideoRelease] = relationship(back_populates="production_artifacts")
 
 
 class ReleasePresentationRevision(Base):

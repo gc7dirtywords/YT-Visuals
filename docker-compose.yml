@@ -1,0 +1,13 @@
+services:
+  yt-channelops:
+    build: .
+    ports: ["8765:8765"]
+    environment:
+      PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      YT_CHANNELOPS_MAX_RELEASE_ARTIFACT_UPLOAD_BYTES: ${YT_CHANNELOPS_MAX_RELEASE_ARTIFACT_UPLOAD_BYTES:-2147483648}
+    volumes:
+      - ${YT_CHANNELOPS_CONFIG_ROOT:-./.docker-data/config}:/config
+      - ${YT_CHANNELOPS_PROJECTS_ROOT:-./.docker-data/projects}:/projects
+      - ${YT_CHANNELOPS_LIBRARY_ROOT:-./.docker-data/library}:/library
+      - ${YT_CHANNELOPS_RELEASES_ROOT:-./.docker-data/releases}:/releases
+      - ${YT_CHANNELOPS_TEMP_ROOT:-./.docker-data/temp}:/temp

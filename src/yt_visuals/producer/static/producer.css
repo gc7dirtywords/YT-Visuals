@@ -54,3 +54,12 @@ body{background:#0b1016}.surface-panel{min-width:0;padding:1rem;border:1px solid
 @container beats-workspace (max-width:560px){.brief-grid{grid-template-columns:1fr}.production-toolbar{grid-template-columns:1fr}.toolbar-progress,.toolbar-storyboard,.toolbar-actions{grid-column:1;grid-row:auto;justify-self:start}.toolbar-actions{flex-wrap:wrap}.candidate-grid{grid-template-columns:1fr}.sourcing-body>form,.upload-source form{align-items:stretch;flex-direction:column}.beat-heading small{white-space:normal}.opportunities,.queries,.selection-panel,.candidate-section,.manual-import,.sourcing-sections{padding-inline:.9rem}}
 .release-header h1{font-size:clamp(30px,2.2vw,46px);line-height:1.08;overflow-wrap:anywhere}.workspace-header h1{font-size:clamp(32px,2.5vw,52px);line-height:1.06;overflow-wrap:anywhere}.timeline:before{left:6.65rem}.timeline-event{grid-template-columns:6.15rem minmax(0,1fr);gap:1rem}.timeline-detail{padding-left:.85rem}.timeline-detail:before{left:-.93rem}.timeline-detail>strong{color:var(--ink);font-size:.9rem;line-height:1.3}.timeline-source{color:#8393a5;font-size:.69rem}.timeline-time{font-size:.72rem;line-height:1.3}.timeline-time small{font-size:.69rem}
 @media (max-width:899px){.timeline:before{left:.3rem}.timeline-event{grid-template-columns:1fr;gap:.3rem}.timeline-detail{padding-left:0}.timeline-detail:before{left:-1.15rem}}
+body.server-mode form[action$="/open"],
+body.server-mode form[action$="/open-folder"],
+body.server-mode .local-folder-copy {
+  display: none;
+}
+
+body.server-mode .handoff-section .organization-note {
+  display: none;
+}
