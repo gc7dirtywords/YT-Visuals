@@ -4,12 +4,13 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}YT-ChannelOps{% endblock %}</title>
+    <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/gc7dirtywords/YT-Visuals/main/assets/yt-channelops-icon.png">
     <link rel="stylesheet" href="{{ url_for('static', filename='producer.css') }}">
     <script src="{{ url_for('static', filename='producer.js') }}" defer></script>
   </head>
   <body{% if server_mode %} class="server-mode"{% endif %}>
     <header class="topbar">
-      <a class="brand" href="{{ url_for('index') }}">YT‑ChannelOps</a>
+      <a class="brand" href="{{ url_for('index') }}"><img class="brand-icon" src="https://raw.githubusercontent.com/gc7dirtywords/YT-Visuals/main/assets/yt-channelops-icon.png" alt="">YT‑ChannelOps</a>
       <nav class="topnav">
         <a href="{{ url_for('integrations') }}">Settings</a>
         <a class="pexels-link" href="https://www.pexels.com" target="_blank" rel="noreferrer">Photos and videos provided by Pexels</a>

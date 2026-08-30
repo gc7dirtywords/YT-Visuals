@@ -9,7 +9,7 @@ button.primary { background:var(--accent); border-color:var(--accent); color:#17
 input[type="url"],input[type="file"],input[type="password"],input[type="text"] { width:100%; border:1px solid var(--line); border-radius:8px; background:#0f151c; color:var(--ink); padding:.65rem; }
 .button-link{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:8px;background:#202a35;color:var(--ink);padding:.62rem .85rem;text-decoration:none}.button-link:hover{border-color:#65768a}
 .topbar { position:sticky; top:0; z-index:10; display:flex; justify-content:space-between; align-items:center; padding:1rem 28px; background:rgba(13,17,23,.94); border-bottom:1px solid var(--line); backdrop-filter:blur(12px); }
-.brand { color:var(--ink); text-decoration:none; font-size:1.12rem; font-weight:800; letter-spacing:.02em; }.brand span{color:var(--accent)}
+.brand { display:inline-flex; align-items:center; gap:.45rem; color:var(--ink); text-decoration:none; font-size:1.12rem; font-weight:800; letter-spacing:.02em; }.brand-icon{width:20px;height:20px;border-radius:4px;object-fit:cover}.brand span{color:var(--accent)}
 .pexels-link { color:var(--muted); font-size:.78rem; }
 .topnav{display:flex;align-items:center;gap:1rem}.topnav>a{text-decoration:none}.integration-banner{display:flex;justify-content:space-between;gap:1rem;margin-bottom:1rem;padding:.85rem 1rem;border:1px solid #7c5b25;border-radius:10px;background:#2b2113;text-decoration:none}.integration-banner span{color:#d8c29d}
 .shell { width:auto; max-width:none; margin:0; padding:36px 28px 5rem; }

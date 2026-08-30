@@ -931,6 +931,8 @@ def test_release_thumbnail_upload_reuses_library_ingestion_and_sectioned_ui(
     assert b"Add thumbnail" in uploaded.data
     assert b"Show More" in uploaded.data
     assert b"YT-ChannelOps" in uploaded.data
+    assert b'rel="icon" type="image/png" href="https://raw.githubusercontent.com/gc7dirtywords/YT-Visuals/main/assets/yt-channelops-icon.png"' in uploaded.data
+    assert b'class="brand-icon" src="https://raw.githubusercontent.com/gc7dirtywords/YT-Visuals/main/assets/yt-channelops-icon.png"' in uploaded.data
     detail = service.get_release(release["id"])
     thumbnail_id = detail["presentation"]["thumbnail_asset_id"]
     assert thumbnail_id is not None
