@@ -4,6 +4,7 @@ import csv
 import hashlib
 import html
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -46,7 +47,14 @@ from ..providers.registry import create_provider
 from ..services import MediaCatalogService, SearchMediaRequest
 from ..services.errors import MediaServiceError
 from ..services.schemas import AssetDetailResult, SearchCandidateResult
-from .contracts import VisualPlan, validate_visual_plan_file
+from .contracts import (
+    MOTION_TYPES,
+    TRANSITION_TYPES,
+    EditPlan,
+    VisualPlan,
+    validate_edit_plan_file,
+    validate_visual_plan_file,
+)
 from .storyboard import render_producer_storyboard
 
 
@@ -105,6 +113,81 @@ class ProducerWorkflowService:
 
     def import_plan_file(self, path: Path) -> dict[str, Any]:
         return self.import_plan(validate_visual_plan_file(path))
+
+    @staticmethod
+    def validate_edit_plan_file(path: Path) -> EditPlan:
+        return validate_edit_plan_file(path)
+
+    def import_edit_plan_file(self, workspace_id: str, path: Path) -> dict[str, Any]:
+        return self.import_edit_plan(workspace_id, validate_edit_plan_file(path))
+
+    def import_edit_plan(self, workspace_id: str, plan: EditPlan) -> dict[str, Any]:
+        with Session(self.engine) as session:
+            workspace = session.scalar(
+                select(ProducerWorkspace)
+                .where(ProducerWorkspace.id == workspace_id)
+                .options(selectinload(ProducerWorkspace.beats))
+            )
+            if workspace is None:
+                raise ProducerWorkflowError("producer workspace was not found")
+            if plan.story.story_id != workspace.story_external_id:
+                raise ProducerWorkflowError("Edit Plan story ID does not match this workspace")
+            beats = sorted(workspace.beats, key=lambda item: item.sequence)
+            expected = [(beat.external_beat_id, beat.sequence) for beat in beats]
+            supplied = [(beat.beat_id, beat.sequence) for beat in plan.beats]
+            if supplied != expected:
+                raise ProducerWorkflowError(
+                    "Edit Plan beat IDs and sequence must exactly match the workspace"
+                )
+            before = {"document_sha256": workspace.edit_plan_document_sha256}
+            for row, recommendation in zip(beats, plan.beats, strict=True):
+                if row.selected_asset_id is None:
+                    raise ProducerWorkflowError(
+                        f"select a visual for beat {row.external_beat_id} before importing Edit Plan guidance"
+                    )
+                asset = session.get(MediaAsset, row.selected_asset_id)
+                if asset is None or not self._media_asset_is_available(asset):
+                    raise ProducerWorkflowError(
+                        f"the selected visual for beat {row.external_beat_id} is unavailable"
+                    )
+                self._validate_motion_for_media(
+                    recommendation.motion_recommendation.type,
+                    asset.media_type,
+                    beat_id=row.external_beat_id,
+                )
+                motion = recommendation.motion_recommendation.model_dump(mode="json")
+                transition = (
+                    recommendation.transition_out_recommendation.model_dump(mode="json")
+                    if recommendation.transition_out_recommendation
+                    else None
+                )
+                row.edit_motion_recommendation_json = motion
+                row.edit_transition_recommendation_json = transition
+                row.producer_motion_type = motion["type"]
+                row.producer_motion_target = motion["target"]
+                row.producer_transition_type = transition["type"] if transition else None
+                row.edit_guidance_asset_sha256 = row.selected_asset_sha256
+                row.edit_guidance_needs_review = False
+            workspace.edit_plan_document_sha256 = plan.document_sha256()
+            workspace.edit_plan_json = plan.model_dump(mode="json")
+            workspace.edit_plan_imported_at = datetime.now(timezone.utc)
+            self._record_event(
+                session,
+                "workspace",
+                workspace.id,
+                "workspace.edit_plan_imported",
+                before=before,
+                after={"document_sha256": workspace.edit_plan_document_sha256},
+            )
+            session.commit()
+            result = {
+                "workspace_id": workspace.id,
+                "story_id": workspace.story_external_id,
+                "beats": len(beats),
+                "document_sha256": workspace.edit_plan_document_sha256,
+            }
+        self.build_edit_folder(workspace_id)
+        return result
 
     def import_plan(self, plan: VisualPlan) -> dict[str, Any]:
         digest = plan.document_sha256()
@@ -224,6 +307,7 @@ class ProducerWorkflowService:
                     "selected_asset_id": beat.selected_asset_id,
                     "selected_sfx_asset_id": beat.selected_sfx_asset_id,
                     "hidden_asset_ids": [item.asset_id for item in beat.hidden_assets],
+                    "edit_guidance": self._edit_guidance_view(beat),
                 }
                 for beat in workspace.beats
             ]
@@ -237,6 +321,11 @@ class ProducerWorkflowService:
                 "release_count": len(workspace.video_release.workspaces) if workspace.video_release else 0,
                 "edit_folder": str(self.edit_folder(workspace.story_external_id)),
                 "storyboard": self._storyboard_view(workspace.story_external_id),
+                "edit_plan": {
+                    "imported": workspace.edit_plan_json is not None,
+                    "document_sha256": workspace.edit_plan_document_sha256,
+                    "imported_at": workspace.edit_plan_imported_at,
+                },
                 "selected": sum(1 for row in rows if row["selected_asset_id"]),
                 "selected_sfx": sum(1 for row in rows if row["selected_sfx_asset_id"]),
                 "total": len(rows),
@@ -295,6 +384,141 @@ class ProducerWorkflowService:
                 sfx_reuse_groups, beat["id"], displayed_asset_ids=sfx_displayed
             )
         return result
+
+    @staticmethod
+    def _edit_guidance_view(beat: ProducerBeat) -> dict[str, Any] | None:
+        if beat.edit_motion_recommendation_json is None:
+            return None
+        return {
+            "motion_recommendation": dict(beat.edit_motion_recommendation_json),
+            "transition_recommendation": (
+                dict(beat.edit_transition_recommendation_json)
+                if beat.edit_transition_recommendation_json is not None
+                else None
+            ),
+            "producer_motion_type": beat.producer_motion_type,
+            "producer_motion_target": beat.producer_motion_target,
+            "producer_transition_type": beat.producer_transition_type,
+            "asset_sha256": beat.edit_guidance_asset_sha256,
+            "needs_review": beat.edit_guidance_needs_review,
+        }
+
+    @staticmethod
+    def _validate_motion_for_media(
+        motion_type: str, media_type: str, *, beat_id: str
+    ) -> None:
+        if media_type not in {"image", "video"}:
+            raise ProducerWorkflowError(
+                f"beat {beat_id} must use an image or video for edit guidance"
+            )
+        if media_type == "image" and motion_type == "native":
+            raise ProducerWorkflowError(
+                f"beat {beat_id} uses an image, so its motion cannot be native"
+            )
+        if media_type == "video" and motion_type != "native":
+            raise ProducerWorkflowError(
+                f"beat {beat_id} uses video, so its motion must be native"
+            )
+
+    @staticmethod
+    def _media_asset_is_available(asset: MediaAsset) -> bool:
+        return bool(
+            asset.status == "active"
+            and asset.sha256
+            and any(location.status == "available" for location in asset.locations)
+        )
+
+    def update_edit_guidance_choice(
+        self,
+        workspace_id: str,
+        beat_id: str,
+        *,
+        motion_type: str,
+        motion_target: str | None,
+        transition_type: str | None,
+    ) -> None:
+        if motion_type not in MOTION_TYPES:
+            raise ProducerWorkflowError("unsupported producer motion choice")
+        if transition_type not in (*TRANSITION_TYPES, None):
+            raise ProducerWorkflowError("unsupported producer transition choice")
+        clean_target = motion_target.strip() if motion_target else None
+        with Session(self.engine) as session:
+            beat = self._session_beat(session, workspace_id, beat_id)
+            if beat.edit_motion_recommendation_json is None:
+                raise ProducerWorkflowError("import an Edit Plan before changing edit guidance")
+            asset = session.get(MediaAsset, beat.selected_asset_id) if beat.selected_asset_id else None
+            if asset is None or not self._media_asset_is_available(asset):
+                raise ProducerWorkflowError("select an available visual before changing edit guidance")
+            self._validate_motion_for_media(
+                motion_type, asset.media_type, beat_id=beat.external_beat_id
+            )
+            is_final = beat.edit_transition_recommendation_json is None
+            if is_final and transition_type is not None:
+                raise ProducerWorkflowError("the final beat cannot have an outgoing transition")
+            if not is_final and transition_type is None:
+                raise ProducerWorkflowError("a non-final beat requires an outgoing transition")
+            before = self._producer_edit_choice(beat)
+            beat.producer_motion_type = motion_type
+            beat.producer_motion_target = clean_target
+            beat.producer_transition_type = transition_type
+            beat.edit_guidance_asset_sha256 = beat.selected_asset_sha256
+            beat.edit_guidance_needs_review = False
+            after = self._producer_edit_choice(beat)
+            self._record_event(
+                session, "workspace", workspace_id, "workspace.edit_guidance_updated",
+                before={"beat_id": beat.external_beat_id, **before},
+                after={"beat_id": beat.external_beat_id, **after},
+            )
+            session.commit()
+        self.build_edit_folder(workspace_id)
+
+    def reset_edit_guidance_choice(self, workspace_id: str, beat_id: str) -> None:
+        with Session(self.engine) as session:
+            beat = self._session_beat(session, workspace_id, beat_id)
+            motion = beat.edit_motion_recommendation_json
+            if motion is None:
+                raise ProducerWorkflowError("import an Edit Plan before resetting edit guidance")
+            asset = session.get(MediaAsset, beat.selected_asset_id) if beat.selected_asset_id else None
+            if asset is None or not self._media_asset_is_available(asset):
+                raise ProducerWorkflowError("select an available visual before resetting edit guidance")
+            self._validate_motion_for_media(
+                motion["type"], asset.media_type, beat_id=beat.external_beat_id
+            )
+            before = self._producer_edit_choice(beat)
+            transition = beat.edit_transition_recommendation_json
+            beat.producer_motion_type = motion["type"]
+            beat.producer_motion_target = motion["target"]
+            beat.producer_transition_type = transition["type"] if transition else None
+            beat.edit_guidance_asset_sha256 = beat.selected_asset_sha256
+            beat.edit_guidance_needs_review = False
+            after = self._producer_edit_choice(beat)
+            self._record_event(
+                session, "workspace", workspace_id, "workspace.edit_guidance_reset",
+                before={"beat_id": beat.external_beat_id, **before},
+                after={"beat_id": beat.external_beat_id, **after},
+            )
+            session.commit()
+        self.build_edit_folder(workspace_id)
+
+    @staticmethod
+    def _producer_edit_choice(beat: ProducerBeat) -> dict[str, Any]:
+        return {
+            "motion_type": beat.producer_motion_type,
+            "motion_target": beat.producer_motion_target,
+            "transition_type": beat.producer_transition_type,
+            "selected_asset_sha256": beat.edit_guidance_asset_sha256,
+            "needs_review": beat.edit_guidance_needs_review,
+        }
+
+    @staticmethod
+    def _mark_edit_guidance_for_visual_change(
+        beat: ProducerBeat, new_sha256: str | None
+    ) -> None:
+        if (
+            beat.edit_motion_recommendation_json is not None
+            and beat.selected_asset_sha256 != new_sha256
+        ):
+            beat.edit_guidance_needs_review = True
 
     @staticmethod
     def _release_view(release: VideoRelease | None) -> dict[str, Any] | None:
@@ -1081,6 +1305,7 @@ class ProducerWorkflowService:
             raise ProducerWorkflowError("the selected asset is not locally available")
         with Session(self.engine) as session:
             beat = self._session_beat(session, workspace_id, beat_id)
+            self._mark_edit_guidance_for_visual_change(beat, detail.sha256)
             preference = beat.specification_json["media_preference"]
             if preference != "either" and detail.media_type != preference:
                 if not override_media_preference:
@@ -1111,6 +1336,7 @@ class ProducerWorkflowService:
     ) -> None:
         with Session(self.engine) as session:
             beat = self._session_beat(session, workspace_id, beat_id)
+            self._mark_edit_guidance_for_visual_change(beat, None)
             beat.selected_asset_id = None
             beat.selected_asset_sha256 = None
             beat.selected_at = None
@@ -1169,6 +1395,7 @@ class ProducerWorkflowService:
             if hidden is None:
                 session.add(ProducerBeatHiddenAsset(beat=beat, asset=asset))
             if beat.selected_asset_id == asset_id:
+                self._mark_edit_guidance_for_visual_change(beat, None)
                 beat.selected_asset_id = None
                 beat.selected_asset_sha256 = None
                 beat.selected_at = None
@@ -1482,6 +1709,7 @@ class ProducerWorkflowService:
         staging_visuals.mkdir(parents=True)
         staging_sfx.mkdir(parents=True)
         rows: list[dict[str, Any]] = []
+        visual_edit_paths: dict[str, str] = {}
         max_sequence = max((beat["sequence"] for beat in workspace["beats"]), default=1)
         prefix_width = max(3, len(str(max_sequence)))
 
@@ -1572,6 +1800,7 @@ class ProducerWorkflowService:
                         "sfx_kind": "",
                     }
                 )
+                visual_edit_paths[beat["beat_id"]] = f"Visuals/{filename}"
                 sfx_row = stage_sfx(beat)
                 if sfx_row:
                     rows.append(sfx_row)
@@ -1586,6 +1815,48 @@ class ProducerWorkflowService:
                 writer.writeheader()
                 writer.writerows(rows)
 
+            edit_plan_path: Path | None = None
+            if workspace["edit_plan"]["imported"]:
+                handoff = {
+                    "document_type": "producer_edit_plan",
+                    "contract_version": 1,
+                    "story": {"story_id": workspace["story_id"]},
+                    "beats": [
+                        {
+                            "beat_id": beat["beat_id"],
+                            "sequence": beat["sequence"],
+                            "selected_visual": (
+                                {
+                                    "edit_path": visual_edit_paths[beat["beat_id"]],
+                                    "media_type": beat["selected"]["media_type"],
+                                    "sha256": beat["selected"]["sha256"],
+                                }
+                                if beat["selected"] is not None
+                                else None
+                            ),
+                            "motion": {
+                                "type": beat["edit_guidance"]["producer_motion_type"],
+                                "target": beat["edit_guidance"]["producer_motion_target"],
+                            },
+                            "transition_out": (
+                                {
+                                    "type": beat["edit_guidance"]["producer_transition_type"],
+                                    "to_beat_id": beat["edit_guidance"]["transition_recommendation"]["to_beat_id"],
+                                }
+                                if beat["edit_guidance"]["transition_recommendation"]
+                                else None
+                            ),
+                            "needs_review": beat["edit_guidance"]["needs_review"],
+                        }
+                        for beat in workspace["beats"]
+                    ],
+                }
+                edit_plan_path = staging / "edit_plan.json"
+                edit_plan_path.write_text(
+                    json.dumps(handoff, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
             edit_root.mkdir(parents=True, exist_ok=True)
             visuals = edit_root / "Visuals"
             sfx = edit_root / "SFX"
@@ -1598,9 +1869,19 @@ class ProducerWorkflowService:
                 shutil.rmtree(sfx)
             shutil.move(str(staging_sfx), str(sfx))
             shutil.copy2(manifest, edit_root / "manifest.csv")
+            if edit_plan_path is not None:
+                shutil.copy2(edit_plan_path, edit_root / "edit_plan.json")
         finally:
             shutil.rmtree(staging, ignore_errors=True)
-        return {"edit_folder": str(edit_root), "entries": rows}
+        return {
+            "edit_folder": str(edit_root),
+            "entries": rows,
+            "edit_plan_path": (
+                str(edit_root / "edit_plan.json")
+                if workspace["edit_plan"]["imported"]
+                else None
+            ),
+        }
 
     def generate_storyboard(self, workspace_id: str) -> dict[str, Any]:
         workspace = self.get_workspace(workspace_id, include_candidates=False)
@@ -1743,6 +2024,7 @@ class ProducerWorkflowService:
         ) else "provider_download"
         return {
             "asset_id": detail.asset_id,
+            "sha256": detail.sha256,
             "relative_path": detail.relative_path,
             "current_location": detail.current_location,
             "media_type": detail.media_type,

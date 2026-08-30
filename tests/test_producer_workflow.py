@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 from pathlib import Path
 
 import httpx
@@ -29,7 +30,7 @@ from yt_visuals.models import (
     ProductionEvent,
     ReleasePresentationRevision,
 )
-from yt_visuals.producer.contracts import VisualPlan
+from yt_visuals.producer.contracts import EditPlan, VisualPlan
 from yt_visuals.producer.service import (
     ProducerWorkflowError,
     ProducerWorkflowService,
@@ -94,6 +95,42 @@ def _sfx_plan() -> VisualPlan:
         }
     ]
     return VisualPlan.model_validate(value)
+
+
+def _edit_plan() -> EditPlan:
+    return EditPlan.model_validate(
+        {
+            "document_type": "edit_plan",
+            "contract_version": 1,
+            "story": {"story_id": "producer-story"},
+            "beats": [
+                {
+                    "beat_id": "beat-001",
+                    "sequence": 1,
+                    "motion_recommendation": {
+                        "type": "slow_zoom_in",
+                        "purpose": "Draw attention toward the fireplace.",
+                        "target": "fireplace",
+                    },
+                    "transition_out_recommendation": {
+                        "type": "cross_dissolve",
+                        "to_beat_id": "beat-002",
+                        "purpose": "Ease into the empty room.",
+                    },
+                },
+                {
+                    "beat_id": "beat-002",
+                    "sequence": 2,
+                    "motion_recommendation": {
+                        "type": "static",
+                        "purpose": "Hold the empty composition.",
+                        "target": None,
+                    },
+                    "transition_out_recommendation": None,
+                },
+            ],
+        }
+    )
 
 
 def _image(path: Path, color: str = "navy", size: tuple[int, int] = (160, 90)) -> bytes:
@@ -1144,4 +1181,111 @@ def test_edit_folder_order_fallback_and_storyboard_with_unselected_beat(
     assert storyboard["pages"] == 3
     assert Path(storyboard["storyboard_path"]).stat().st_size > 0
     assert master.read_bytes() == original
+    engine.dispose()
+
+
+def test_edit_plan_import_choices_review_invalidation_and_handoff(
+    catalog_settings: Settings,
+) -> None:
+    first_path = catalog_settings.root / "Library/Images/dark-fireplace.jpg"
+    second_path = catalog_settings.root / "Library/Images/alternate-fireplace.jpg"
+    _image(first_path, "black")
+    _image(second_path, "maroon")
+    engine, service, imported = _setup(catalog_settings)
+    LibraryScanner(catalog_settings, engine).scan()
+    workspace = service.get_workspace(imported["workspace_id"], include_candidates=False)
+    assets = service.search_existing_media("fireplace")
+    first_asset = assets[0]["asset_id"]
+    second_asset = assets[1]["asset_id"]
+    for beat in workspace["beats"]:
+        service.select_asset(workspace["workspace_id"], beat["id"], first_asset)
+
+    result = service.import_edit_plan(workspace["workspace_id"], _edit_plan())
+    assert result["beats"] == 2
+    generated_handoff = catalog_settings.root / "Projects/producer-story/Edit/edit_plan.json"
+    assert generated_handoff.is_file()
+    detail = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    first_guidance = detail["beats"][0]["edit_guidance"]
+    assert first_guidance["motion_recommendation"]["type"] == "slow_zoom_in"
+    assert first_guidance["producer_motion_type"] == "slow_zoom_in"
+    assert first_guidance["needs_review"] is False
+
+    service.select_asset(
+        workspace["workspace_id"], workspace["beats"][0]["id"], first_asset
+    )
+    unchanged = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    assert unchanged["beats"][0]["edit_guidance"]["needs_review"] is False
+
+    incompatible_document = _edit_plan().model_dump(mode="json")
+    incompatible_document["beats"][0]["motion_recommendation"]["type"] = "native"
+    with pytest.raises(ProducerWorkflowError, match="uses an image"):
+        service.import_edit_plan(
+            workspace["workspace_id"], EditPlan.model_validate(incompatible_document)
+        )
+
+    service.update_edit_guidance_choice(
+        workspace["workspace_id"],
+        workspace["beats"][0]["id"],
+        motion_type="pan_right",
+        motion_target="mantel clock",
+        transition_type="cut",
+    )
+    with Session(engine) as session:
+        stored = session.get(ProducerBeat, workspace["beats"][0]["id"])
+        assert stored is not None
+        assert stored.edit_motion_recommendation_json["type"] == "slow_zoom_in"
+        assert stored.producer_motion_type == "pan_right"
+    assert json.loads(generated_handoff.read_text(encoding="utf-8"))["beats"][0][
+        "motion"
+    ]["type"] == "pan_right"
+
+    service.select_asset(
+        workspace["workspace_id"], workspace["beats"][0]["id"], second_asset
+    )
+    changed = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    assert changed["beats"][0]["edit_guidance"]["needs_review"] is True
+    assert changed["beats"][1]["edit_guidance"]["needs_review"] is False
+
+    built = service.build_edit_folder(workspace["workspace_id"])
+    handoff_path = Path(built["edit_plan_path"])
+    handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+    assert handoff["document_type"] == "producer_edit_plan"
+    assert handoff["beats"][0]["motion"] == {
+        "type": "pan_right", "target": "mantel clock"
+    }
+    assert handoff["beats"][0]["transition_out"]["type"] == "cut"
+    assert handoff["beats"][0]["selected_visual"]["edit_path"].startswith("Visuals/")
+    assert handoff["beats"][0]["needs_review"] is True
+
+    storyboard = service.generate_storyboard(workspace["workspace_id"])
+    pdf = Path(storyboard["storyboard_path"]).read_bytes()
+    assert b"Producer motion" in pdf and b"Pan Right" in pdf
+    assert b"NEEDS REVIEW" in pdf
+
+    service.reset_edit_guidance_choice(
+        workspace["workspace_id"], workspace["beats"][0]["id"]
+    )
+    reset = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    assert reset["beats"][0]["edit_guidance"]["producer_motion_type"] == "slow_zoom_in"
+    assert reset["beats"][0]["edit_guidance"]["needs_review"] is False
+    assert any(event["event_type"] == "workspace.edit_plan_imported" for event in reset["history"])
+    engine.dispose()
+
+
+def test_edit_plan_requires_exact_workspace_identity_and_selected_visuals(
+    catalog_settings: Settings,
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    with pytest.raises(ProducerWorkflowError, match="select a visual"):
+        service.import_edit_plan(imported["workspace_id"], _edit_plan())
+
+    wrong_story = _edit_plan().model_copy(
+        update={"story": _edit_plan().story.model_copy(update={"story_id": "wrong-story"})}
+    )
+    with pytest.raises(ProducerWorkflowError, match="story ID"):
+        service.import_edit_plan(imported["workspace_id"], wrong_story)
+
+    reversed_beats = _edit_plan().model_copy(update={"beats": tuple(reversed(_edit_plan().beats))})
+    with pytest.raises(ProducerWorkflowError, match="exactly match"):
+        service.import_edit_plan(imported["workspace_id"], reversed_beats)
     engine.dispose()

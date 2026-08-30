@@ -701,6 +701,9 @@ class ProducerWorkspace(TimestampMixin, Base):
         ForeignKey("video_releases.id", ondelete="RESTRICT"), nullable=True
     )
     release_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    edit_plan_document_sha256: Mapped[str | None] = mapped_column(String(64))
+    edit_plan_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    edit_plan_imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     beats: Mapped[list["ProducerBeat"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan", order_by="ProducerBeat.sequence"
@@ -842,6 +845,15 @@ class ProducerBeat(TimestampMixin, Base):
     )
     selected_sfx_asset_sha256: Mapped[str | None] = mapped_column(String(64))
     selected_sfx_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edit_motion_recommendation_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    edit_transition_recommendation_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    producer_motion_type: Mapped[str | None] = mapped_column(String(24))
+    producer_motion_target: Mapped[str | None] = mapped_column(Text)
+    producer_transition_type: Mapped[str | None] = mapped_column(String(24))
+    edit_guidance_asset_sha256: Mapped[str | None] = mapped_column(String(64))
+    edit_guidance_needs_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("0")
+    )
 
     workspace: Mapped[ProducerWorkspace] = relationship(back_populates="beats")
     selected_asset: Mapped[MediaAsset | None] = relationship(

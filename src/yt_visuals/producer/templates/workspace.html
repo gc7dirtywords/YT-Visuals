@@ -51,6 +51,17 @@
 
   {% if workspace.history %}<details class="compact-history workspace-history"><summary>Workspace history ({{ workspace.history|length }})</summary><ol>{% for event in workspace.history %}<li><strong>{{ event.label }}</strong><span>{{ event.occurred_at }} · {{ event.source }}</span>{% if event.before is not none %}<span>Before: {{ event.before }}</span>{% endif %}{% if event.after is not none %}<span>After: {{ event.after }}</span>{% endif %}</li>{% endfor %}</ol></details>{% endif %}
 
+  <details class="compact-import edit-plan-import">
+    <summary>Edit Plan{% if workspace.edit_plan.imported %} · Imported{% else %} · Not imported{% endif %}</summary>
+    <form action="{{ url_for('import_edit_plan', workspace_id=workspace.workspace_id) }}" method="post" enctype="multipart/form-data">
+      <label>Edit Plan v1 JSON file <input type="file" name="edit_plan" accept="application/json,.json"></label>
+      <span class="import-or">or</span>
+      <label>Paste Edit Plan v1 JSON <textarea name="edit_plan_json" rows="5" placeholder='{"document_type":"edit_plan","contract_version":1,...}'></textarea></label>
+      <button type="submit">Import Edit Plan</button>
+    </form>
+    <small>Project recommendations are preserved separately from producer choices. Import requires a selected visual for every beat.</small>
+  </details>
+
   <div class="workspace-layout">
     <nav class="beat-navigator" aria-label="Beat navigator">
       <strong>Beats</strong>
@@ -87,6 +98,32 @@
               <p><strong>{{ item.trigger }}</strong>{% if item.sfx_recommendation %} · SFX: {{ item.sfx_recommendation.desired_sound }}{% elif item.sfx_suggestion %} · SFX: {{ item.sfx_suggestion }}{% endif %}{% if item.edit_suggestion %} · Edit: {{ item.edit_suggestion }}{% endif %}</p>
             {% endfor %}
           </section>
+        {% endif %}
+
+        {% if beat.edit_guidance %}
+          {% set guidance = beat.edit_guidance %}
+          <details class="edit-guidance {% if guidance.needs_review %}needs-review{% endif %}">
+            <summary>Edit Guidance · {{ guidance.producer_motion_type|replace('_',' ')|title }}{% if guidance.producer_transition_type %} · {{ guidance.producer_transition_type|replace('_',' ')|title }}{% endif %}{% if guidance.needs_review %} · Needs Review{% endif %}</summary>
+            <div class="edit-guidance-body">
+              {% if guidance.needs_review %}<p class="edit-review-warning"><strong>Needs review:</strong> the selected visual changed after this guidance was imported or confirmed.</p>{% endif %}
+              <div class="edit-guidance-recommendation">
+                <h3>Project recommendation</h3>
+                <p><strong>Motion:</strong> {{ guidance.motion_recommendation.type|replace('_',' ')|title }}{% if guidance.motion_recommendation.target %} · Target: {{ guidance.motion_recommendation.target }}{% endif %}</p>
+                <p>{{ guidance.motion_recommendation.purpose }}</p>
+                {% if guidance.transition_recommendation %}<p><strong>Transition to {{ guidance.transition_recommendation.to_beat_id }}:</strong> {{ guidance.transition_recommendation.type|replace('_',' ')|title }}</p><p>{{ guidance.transition_recommendation.purpose }}</p>{% else %}<p><strong>Transition:</strong> None (final beat)</p>{% endif %}
+              </div>
+              <div class="edit-guidance-choice">
+                <h3>Producer choice</h3>
+                <form action="{{ url_for('update_edit_guidance', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post">
+                  <label>Motion <select name="motion_type">{% for value in ['static','native','slow_zoom_in','slow_zoom_out','pan_left','pan_right','pan_up','pan_down'] %}<option value="{{ value }}" {% if guidance.producer_motion_type == value %}selected{% endif %}>{{ value|replace('_',' ')|title }}</option>{% endfor %}</select></label>
+                  <label>Target <input type="text" name="motion_target" value="{{ guidance.producer_motion_target or '' }}" placeholder="Optional focal subject or region"></label>
+                  {% if guidance.transition_recommendation %}<label>Transition <select name="transition_type">{% for value in ['cut','cross_dissolve','dip_to_black'] %}<option value="{{ value }}" {% if guidance.producer_transition_type == value %}selected{% endif %}>{{ value|replace('_',' ')|title }}</option>{% endfor %}</select></label>{% endif %}
+                  <button type="submit">Save Choice</button>
+                </form>
+                <form action="{{ url_for('reset_edit_guidance', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><button type="submit">Reset to Project Recommendation</button></form>
+              </div>
+            </div>
+          </details>
         {% endif %}
 
         <details class="sfx-section" {% if focused_beat == beat.beat_id and open_panel == 'sfx' %}open{% endif %}>

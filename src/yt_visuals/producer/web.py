@@ -19,7 +19,7 @@ from ..credentials import CredentialStore, CredentialStoreError
 from ..database import initialize_database
 from ..providers.errors import ProviderAuthenticationError, ProviderError
 from ..providers.pexels import PexelsProvider
-from .contracts import VisualPlan
+from .contracts import EditPlan, VisualPlan
 from .service import ProducerWorkflowError, ProducerWorkflowService
 
 
@@ -259,6 +259,48 @@ def create_app(
             open_panel=request.args.get("panel"),
             releases=service.list_releases(show_released=False),
         )
+
+    @app.post("/stories/<workspace_id>/edit-plan")
+    def import_edit_plan(workspace_id: str):
+        pasted = request.form.get("edit_plan_json", "").strip()
+        upload = request.files.get("edit_plan")
+        if pasted:
+            document = pasted
+        elif upload is not None and upload.filename:
+            try:
+                document = upload.read().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                flash(f"Edit Plan validation failed: {_concise(exc)}", "error")
+                return redirect(url_for("workspace", workspace_id=workspace_id))
+        else:
+            flash("Choose an Edit Plan JSON file or paste Edit Plan JSON.", "error")
+            return redirect(url_for("workspace", workspace_id=workspace_id))
+        try:
+            plan = EditPlan.model_validate_json(document)
+            result = service.import_edit_plan(workspace_id, plan)
+        except (ValidationError, json.JSONDecodeError) as exc:
+            flash(f"Edit Plan validation failed: {_concise(exc)}", "error")
+            return redirect(url_for("workspace", workspace_id=workspace_id))
+        flash(f"Edit Plan imported for {result['beats']} beats.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/edit-guidance")
+    def update_edit_guidance(workspace_id: str, beat_id: str):
+        service.update_edit_guidance_choice(
+            workspace_id,
+            beat_id,
+            motion_type=request.form.get("motion_type", ""),
+            motion_target=request.form.get("motion_target") or None,
+            transition_type=request.form.get("transition_type") or None,
+        )
+        flash("Producer edit guidance updated.", "success")
+        return _beat_redirect(service, workspace_id, beat_id)
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/edit-guidance/reset")
+    def reset_edit_guidance(workspace_id: str, beat_id: str):
+        service.reset_edit_guidance_choice(workspace_id, beat_id)
+        flash("Producer edit guidance reset to the Project recommendation.", "success")
+        return _beat_redirect(service, workspace_id, beat_id)
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/select/<int:asset_id>")
     def select_asset(workspace_id: str, beat_id: str, asset_id: int):

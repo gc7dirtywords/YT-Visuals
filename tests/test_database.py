@@ -58,7 +58,7 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         status = get_migration_status(catalog_settings, connection)
         assert status.is_current
-        assert status.current_revision == "0010_release_production_memory"
+        assert status.current_revision == "0011_edit_plan_guidance"
 
     engine.dispose()
 
@@ -277,4 +277,55 @@ def test_0010_backfills_audit_baselines_without_synthesizing_public_titles(
                        WHERE subject_id='workspace-existing'"""
                 )
             )
+    upgraded.dispose()
+
+
+def test_0011_preserves_existing_workspace_and_adds_nullable_edit_guidance(
+    catalog_settings: Settings,
+) -> None:
+    catalog_settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+    command.upgrade(alembic_config(catalog_settings), "0010_release_production_memory")
+    engine = create_catalog_engine(catalog_settings)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """INSERT INTO producer_workspaces
+                   (id, story_external_id, title, plan_document_sha256, plan_json, status)
+                   VALUES ('workspace-edit', 'story-edit', 'Edit Story', :sha, :plan,
+                           'in_production')"""
+            ),
+            {"sha": "a" * 64, "plan": '{"document_type":"visual_plan"}'},
+        )
+        connection.execute(
+            text(
+                """INSERT INTO producer_beats
+                   (id, workspace_id, external_beat_id, sequence, specification_json)
+                   VALUES ('beat-edit', 'workspace-edit', 'beat-001', 1, :spec)"""
+            ),
+            {"spec": '{"desired_visual":"fireplace"}'},
+        )
+    engine.dispose()
+
+    command.upgrade(alembic_config(catalog_settings), "0011_edit_plan_guidance")
+    upgraded = create_catalog_engine(catalog_settings)
+    with upgraded.connect() as connection:
+        workspace = connection.execute(
+            text(
+                """SELECT story_external_id, edit_plan_document_sha256, edit_plan_json,
+                          edit_plan_imported_at
+                   FROM producer_workspaces WHERE id='workspace-edit'"""
+            )
+        ).one()
+        assert workspace == ("story-edit", None, None, None)
+        beat = connection.execute(
+            text(
+                """SELECT edit_motion_recommendation_json,
+                          edit_transition_recommendation_json, producer_motion_type,
+                          producer_motion_target, producer_transition_type,
+                          edit_guidance_asset_sha256, edit_guidance_needs_review
+                   FROM producer_beats WHERE id='beat-edit'"""
+            )
+        ).one()
+        assert beat == (None, None, None, None, None, None, 0)
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
     upgraded.dispose()

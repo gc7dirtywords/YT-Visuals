@@ -56,6 +56,16 @@ def _plan_bytes() -> bytes:
     }'''
 
 
+def _edit_plan_bytes() -> bytes:
+    return b'''{
+      "document_type":"edit_plan","contract_version":1,
+      "story":{"story_id":"web-story"},
+      "beats":[{"beat_id":"beat-001","sequence":1,
+        "motion_recommendation":{"type":"slow_zoom_in","purpose":"Focus on the door.","target":"door handle"},
+        "transition_out_recommendation":null}]
+    }'''
+
+
 def _jpeg() -> io.BytesIO:
     stream = io.BytesIO()
     Image.new("RGB", (120, 68), "brown").save(stream, format="JPEG")
@@ -146,6 +156,53 @@ def test_web_plan_import_accepts_direct_json_paste(catalog_settings: Settings) -
     assert b"Web Story" in response.data
     assert b"Visual Plan imported" in response.data
     assert len(app.extensions["producer_service"].list_workspaces()) == 1
+    engine.dispose()
+
+
+def test_web_edit_plan_import_by_paste_and_file_with_compact_guidance(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    selected = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/upload",
+        data={"media_file": (_jpeg(), "door.jpg")},
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert selected.status_code == 200
+    pasted = client.post(
+        f"/stories/{workspace['workspace_id']}/edit-plan",
+        data={"edit_plan_json": _edit_plan_bytes().decode("utf-8")},
+        follow_redirects=True,
+    )
+    assert pasted.status_code == 200
+    assert b"Edit Plan imported for 1 beats" in pasted.data
+    assert b"Project recommendation" in pasted.data
+    assert b"Producer choice" in pasted.data
+    assert b"Slow Zoom In" in pasted.data
+
+    updated = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/edit-guidance",
+        data={"motion_type": "pan_left", "motion_target": "door", "transition_type": ""},
+        follow_redirects=True,
+    )
+    assert b"Producer edit guidance updated" in updated.data
+    assert b"Pan Left" in updated.data
+    reset = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/edit-guidance/reset",
+        follow_redirects=True,
+    )
+    assert b"reset to the Project recommendation" in reset.data
+
+    uploaded = client.post(
+        f"/stories/{workspace['workspace_id']}/edit-plan",
+        data={"edit_plan": (io.BytesIO(_edit_plan_bytes()), "edit-plan.json")},
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert uploaded.status_code == 200
+    assert b"Edit Plan imported for 1 beats" in uploaded.data
+    assert service.get_workspace(workspace["workspace_id"], include_candidates=False)["edit_plan"]["imported"]
     engine.dispose()
 
 

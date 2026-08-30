@@ -115,6 +115,25 @@ def _render_beat(
             f" | License: {license_record['name'] or 'UNKNOWN'}"
         )
         y = _labeled(pdf, "Selected SFX", detail, 42, y - 4, 528)
+    edit_guidance = beat.get("edit_guidance")
+    if edit_guidance:
+        motion = edit_guidance["producer_motion_type"].replace("_", " ").title()
+        target = edit_guidance.get("producer_motion_target")
+        if target:
+            motion += f" | Target: {target}"
+        y = _labeled(pdf, "Producer motion", motion, 42, y - 4, 528)
+        transition = edit_guidance.get("producer_transition_type")
+        transition_text = transition.replace("_", " ").title() if transition else "None (final beat)"
+        y = _labeled(pdf, "Producer transition", transition_text, 42, y - 4, 528)
+        if edit_guidance["needs_review"]:
+            y = _labeled(
+                pdf,
+                "Edit guidance status",
+                "NEEDS REVIEW — selected visual changed after guidance was imported or confirmed",
+                42,
+                y - 4,
+                528,
+            )
 
     if selected:
         paths: list[Path]
