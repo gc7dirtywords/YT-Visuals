@@ -48,14 +48,3 @@ const openHashBeat = () => {
 };
 window.addEventListener("hashchange", openHashBeat);
 openHashBeat();
-
-const globalActions = document.querySelector("[data-global-actions]");
-document.addEventListener("click", (event) => {
-  if (globalActions?.open && !globalActions.contains(event.target)) globalActions.open = false;
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && globalActions?.open) {
-    globalActions.open = false;
-    globalActions.querySelector("summary")?.focus();
-  }
-});

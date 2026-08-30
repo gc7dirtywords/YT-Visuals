@@ -4,7 +4,9 @@ import csv
 import hashlib
 import io
 import re
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from PIL import Image
@@ -16,7 +18,7 @@ from yt_visuals.config import Settings
 from yt_visuals.credentials import CredentialStore, PEXELS_CREDENTIAL_NAME, SERVICE_NAME
 from yt_visuals.database import initialize_database
 from yt_visuals.library import LibraryScanner
-from yt_visuals.models import MediaAsset, MediaDownload, MediaLocation, MediaSource, ProducerBeat
+from yt_visuals.models import MediaAsset, MediaDownload, MediaLocation, MediaSource, ProducerBeat, ProductionEvent
 from yt_visuals.providers.errors import ProviderAuthenticationError, ProviderConnectionError
 from yt_visuals.producer.web import create_app
 from yt_visuals.producer.service import (
@@ -501,9 +503,10 @@ def test_workspace_renders_sticky_progress_navigation_and_external_import(
     assert b'name="direct_media_url"' in response.data
     assert b'name="source_page_url"' in response.data
     assert b"IntersectionObserver" in client.get("/static/producer.js").data
-    assert b"global-actions" in response.data
+    assert b'class="production-column"' in response.data
+    assert b"Organization" in response.data
     assert b"Open Edit Folder" in response.data
-    assert b"Copy Edit Folder Path" in response.data
+    assert b"Copy Path" in response.data
     engine.dispose()
 
 
@@ -693,10 +696,10 @@ def test_storyboard_generation_persists_controls_and_uses_trusted_paths(
 
     assert b"Storyboard generated" in generated.data
     assert b"Storyboard ready" in generated.data
-    assert b"Open Storyboard Folder" in generated.data
-    assert b"View Storyboard in Browser" in generated.data
+    assert b"Open Folder" in generated.data
+    assert b"View" in generated.data
     assert b"toolbar-actions" in generated.data
-    assert b"global-actions" in generated.data
+    assert b'class="production-column"' in generated.data
     view = client.get(f"/stories/{workspace_id}/storyboard/view")
     assert view.status_code == 200
     assert view.mimetype == "application/pdf"
@@ -760,7 +763,7 @@ def test_rendered_release_form_create_list_assign_and_refresh(catalog_settings: 
         re.DOTALL,
     )
     assert form is not None
-    assert b"Create Video Release" in dashboard.data
+    assert b"Create release" in dashboard.data
     assert b'placeholder="e.g. ECH-R00001 - Hauntings Behind Horror Movies"' in form.group(2)
     assert b'value="' not in form.group(2)
     names = {item.decode() for item in re.findall(rb'name="([^"]+)"', form.group(2))}
@@ -773,7 +776,7 @@ def test_rendered_release_form_create_list_assign_and_refresh(catalog_settings: 
     assert created.status_code == 302
     release = service.list_releases()[0]
     listed = client.get("/")
-    assert b"Video Releases" in listed.data
+    assert b"Releases" in listed.data
     assert b"EP0001-Hauntings Behind Horror Movies" in listed.data
     assert b"0 stories" in listed.data
 
@@ -809,7 +812,7 @@ def test_release_presentation_and_history_render_without_internal_title_synthesi
     release = service.create_release("Internal Only Name")
     empty = client.get(f"/releases/{release['id']}")
     presentation_section = re.search(
-        rb'<section class="presentation-panel">(.*?)</section>', empty.data, re.DOTALL
+        rb'<section class="presentation-panel surface-panel">(.*?)</section>', empty.data, re.DOTALL
     )
     assert presentation_section is not None
     assert b'name="public_title" value=""' in presentation_section.group(1)
@@ -827,10 +830,10 @@ def test_release_presentation_and_history_render_without_internal_title_synthesi
     )
     assert saved.status_code == 200
     assert b"Public Release Title" in saved.data
-    assert b"Presentation history (1)" in saved.data
-    assert b"Release history" in saved.data
+    assert b"Presentation revisions (1)" in saved.data
+    assert b"Newest first" in saved.data
     workspace_page = client.get(f"/stories/{workspace['workspace_id']}")
-    assert b"Workspace history" in workspace_page.data
+    assert b"History" in workspace_page.data
     engine.dispose()
 
 
@@ -901,10 +904,10 @@ def test_released_release_is_not_rendered_as_assignment_option(
 def test_compact_import_navigation_release_metadata_and_finished_filter(catalog_settings: Settings) -> None:
     engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
     dashboard = client.get("/")
-    assert b"+ Import Visual Plan" in dashboard.data
+    assert b"Import Visual Plan" in dashboard.data
     assert b'<details class="compact-import" >' in dashboard.data
-    assert b'class="dashboard-columns"' in dashboard.data
-    assert b'class="dashboard-column release-column"' in dashboard.data
+    assert b'class="dashboard-columns three-column-layout"' in dashboard.data
+    assert b'class="dashboard-column release-column surface-panel"' in dashboard.data
     assert b'class="dashboard-column story-column"' in dashboard.data
     failed = client.post("/plans", data={}, follow_redirects=True)
     assert b"Choose a Visual Plan JSON file" in failed.data
@@ -918,9 +921,9 @@ def test_compact_import_navigation_release_metadata_and_finished_filter(catalog_
         follow_redirects=True,
     )
     assert b"In Production" in detail.data and b"2026-10-31" in detail.data
-    assert b"Workspaces" in detail.data
+    assert b"Stories" in detail.data
     workspace_page = client.get(f"/stories/{workspace['workspace_id']}")
-    assert b"Workspaces" in workspace_page.data and b"Release metadata" in workspace_page.data
+    assert b"Production" in workspace_page.data and b"Release metadata" in workspace_page.data
     service.update_release_metadata(release["id"], status="released", release_date="2026-10-31")
     hidden = client.get("/")
     shown = client.get("/?show_finished=1")
@@ -937,7 +940,7 @@ def test_actions_rename_story_is_discoverable_and_preserves_story_identity(
     service.assign_workspace_release(workspace["workspace_id"], release["id"])
     before = service.get_workspace(workspace["workspace_id"], include_candidates=False)
     page = client.get(f"/stories/{workspace['workspace_id']}")
-    assert b"Rename Story" in page.data
+    assert b"Rename" in page.data
     assert b'name="title" value="Web Story"' in page.data
     renamed = client.post(
         f"/stories/{workspace['workspace_id']}/organization/title",
@@ -951,6 +954,56 @@ def test_actions_rename_story_is_discoverable_and_preserves_story_identity(
     assert after["edit_folder"] == before["edit_folder"]
     assert b"Renamed Web Story" in client.get("/").data
     assert b"Renamed Web Story" in client.get(f"/releases/{release['id']}").data
+    engine.dispose()
+
+
+def test_shared_history_timeline_pages_older_events_and_release_reorder_returns(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
+    release = service.create_release("Timeline release")
+    service.assign_workspace_release(workspace["workspace_id"], release["id"])
+    for index in range(32):
+        service.rename_workspace_title(workspace["workspace_id"], f"Timeline Story {index}")
+
+    recorded_utc = datetime(2027, 1, 15, 18, 5, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        session.add(
+            ProductionEvent(
+                id=str(uuid4()),
+                subject_type="workspace",
+                subject_id=workspace["workspace_id"],
+                event_type="workspace.display_time_tested",
+                occurred_at=recorded_utc,
+                source="test",
+                payload_json={},
+            )
+        )
+        session.commit()
+
+    story = client.get(f"/stories/{workspace['workspace_id']}")
+    assert story.status_code == 200
+    assert b'class="timeline"' in story.data
+    assert b"Older events" in story.data
+    local_event = recorded_utc.astimezone()
+    assert local_event.strftime("%b %d, %Y").encode() in story.data
+    assert local_event.strftime("%I:%M %p").lstrip("0").encode() in story.data
+    older_story = client.get(f"/stories/{workspace['workspace_id']}?history_offset=30")
+    assert older_story.status_code == 200
+    assert b"Newer events" in older_story.data
+
+    for index in range(32):
+        service.rename_release(release["id"], f"Timeline release {index}")
+    release_page = client.get(f"/releases/{release['id']}")
+    assert b'class="timeline"' in release_page.data
+    assert b"Older events" in release_page.data
+    older_release = client.get(f"/releases/{release['id']}?history_offset=30")
+    assert b"Newer events" in older_release.data
+    moved = client.post(
+        f"/stories/{workspace['workspace_id']}/organization/order/up",
+        data={"return_to_release": release["id"]},
+    )
+    assert moved.headers["Location"].endswith(f"/releases/{release['id']}")
     engine.dispose()
 
 

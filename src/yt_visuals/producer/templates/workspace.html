@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components.html" import history_timeline, progress, status_chip %}
 {% block title %}{{ workspace.title }} · YT-ChannelOps{% endblock %}
 {% block content %}
   <nav class="breadcrumbs"><a href="{{ url_for('index') }}">← Workspaces</a>{% if workspace.release %}<span>/</span><a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>{% endif %}</nav>
@@ -6,52 +7,24 @@
     <div>
       <p class="eyebrow">{{ workspace.story_id }}</p>
       <h1>{{ workspace.title }}</h1>
-      <p class="completion"><strong>{{ workspace.selected }} / {{ workspace.total }}</strong> beats selected</p>
+      <p class="completion">{{ progress(workspace.selected, workspace.total) }}</p>
       <p class="organization-summary">Status: <strong>{{ workspace.status|replace('_', ' ')|title }}</strong>{% if workspace.release %} · Video Release: <a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>{% if workspace.release_position %} · {{ workspace.release_position }} of {{ workspace.release_count }}{% endif %}{% endif %}</p>
     </div>
   </section>
 
-  {% if workspace.storyboard.exists %}
-    <section class="storyboard-status">
-      <strong>Storyboard ready</strong>
-      <span>{{ workspace.storyboard.path }}</span>
-    </section>
-  {% endif %}
+  <div class="story-layout three-column-layout">
+    <aside class="production-column">
+      <section class="production-section surface-panel">
+        <div class="section-heading"><h2>Production</h2>{{ status_chip(workspace.status) }}</div>
+        <section class="organization-section">
+          <div class="section-heading"><h3>Organization</h3><details><summary>Rename</summary><form action="{{ url_for('rename_workspace_title', workspace_id=workspace.workspace_id) }}" method="post"><label>Story display title <input name="title" value="{{ workspace.title }}" required></label><button type="submit">Save title</button></form></details></div>
+          {% if workspace.release %}<p class="organization-note">Status is controlled by <a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>.</p>{% else %}<form action="{{ url_for('update_workspace_status', workspace_id=workspace.workspace_id) }}" method="post"><label>Status <select name="status">{% for value, label in [('planned','Planned'),('in_production','In Production'),('completed','Completed')] %}<option value="{{ value }}" {% if workspace.status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button type="submit">Update status</button></form>{% endif %}
+          <form action="{{ url_for('assign_workspace_release', workspace_id=workspace.workspace_id) }}" method="post"><label>Video Release <select name="release_id"><option value="">Unassigned</option>{% for release in releases %}<option value="{{ release.id }}" {% if workspace.release and workspace.release.id == release.id %}selected{% endif %}>{{ release.name }}</option>{% endfor %}</select></label><button type="submit">Update release</button></form>
+          {% if workspace.release %}<div class="inline-actions"><form action="{{ url_for('move_workspace_release', workspace_id=workspace.workspace_id, direction='up') }}" method="post"><button type="submit">Move story up</button></form><form action="{{ url_for('move_workspace_release', workspace_id=workspace.workspace_id, direction='down') }}" method="post"><button type="submit">Move story down</button></form></div>{% endif %}
+        </section>
+      </section>
 
-  <section class="production-toolbar" aria-label="Story production status">
-    <strong class="toolbar-title" title="{{ workspace.title }}">{{ workspace.title }}</strong>
-    <span class="toolbar-progress"><b>{{ workspace.selected }} / {{ workspace.total }}</b> SELECTED</span>
-    <span class="toolbar-storyboard">{{ 'Storyboard ready' if workspace.storyboard.exists else 'Storyboard pending' }}</span>
-    <div class="toolbar-actions">
-      <button type="button" data-expand-all>Expand All</button>
-      <button type="button" data-collapse-completed>Collapse Completed</button>
-      <details class="global-actions" data-global-actions>
-        <summary aria-label="Open workspace actions">☰ Actions</summary>
-        <div class="actions-menu">
-          <details class="rename-story"><summary>Rename Story</summary><form action="{{ url_for('rename_workspace_title', workspace_id=workspace.workspace_id) }}" method="post"><label>Story display title <input name="title" value="{{ workspace.title }}" required></label><button type="submit">Save title</button></form></details>
-          <details class="organization-controls"><summary>Workspace Organization</summary>
-            {% if workspace.release %}<p class="organization-note">Status is controlled by the assigned release.</p>{% else %}<form action="{{ url_for('update_workspace_status', workspace_id=workspace.workspace_id) }}" method="post"><label>Status <select name="status">{% for value, label in [('planned','Planned'),('in_production','In Production'),('completed','Completed')] %}<option value="{{ value }}" {% if workspace.status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button type="submit">Update status</button></form>{% endif %}
-            <form action="{{ url_for('assign_workspace_release', workspace_id=workspace.workspace_id) }}" method="post"><label>Video Release <select name="release_id"><option value="">Unassigned</option>{% for release in releases %}<option value="{{ release.id }}" {% if workspace.release and workspace.release.id == release.id %}selected{% endif %}>{{ release.name }}</option>{% endfor %}</select></label><button type="submit">Update release</button></form>
-            {% if workspace.release %}<form action="{{ url_for('move_workspace_release', workspace_id=workspace.workspace_id, direction='up') }}" method="post"><button type="submit">Move story up</button></form><form action="{{ url_for('move_workspace_release', workspace_id=workspace.workspace_id, direction='down') }}" method="post"><button type="submit">Move story down</button></form>{% endif %}
-          </details>
-          <form action="{{ url_for('open_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Edit Folder</button></form>
-          <button type="button" data-copy="{{ workspace.edit_folder }}">Copy Edit Folder Path</button>
-          <form action="{{ url_for('rebuild_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Rebuild Edit Folder</button></form>
-          <form action="{{ url_for('generate_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">{{ 'Regenerate Storyboard' if workspace.storyboard.exists else 'Generate Storyboard' }}</button></form>
-          {% if workspace.storyboard.exists %}
-            <a class="button-link" href="{{ url_for('view_storyboard', workspace_id=workspace.workspace_id) }}" target="_blank">View Storyboard in Browser</a>
-            <form action="{{ url_for('open_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Storyboard</button></form>
-            <form action="{{ url_for('open_storyboard_folder', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Storyboard Folder</button></form>
-          {% endif %}
-          <details class="delete-workspace"><summary>Delete workspace</summary><p>Deletes this workspace and its project files only. Master Library assets remain.</p><form action="{{ url_for('delete_workspace', workspace_id=workspace.workspace_id) }}" method="post"><label>Type <code>{{ workspace.story_id }}</code> to confirm <input name="confirm" required></label><button type="submit">Delete workspace</button></form></details>
-        </div>
-      </details>
-    </div>
-  </section>
-
-  {% if workspace.history %}<details class="compact-history workspace-history"><summary>Workspace history ({{ workspace.history|length }})</summary><ol>{% for event in workspace.history %}<li><strong>{{ event.label }}</strong><span>{{ event.occurred_at }} · {{ event.source }}</span>{% if event.before is not none %}<span>Before: {{ event.before }}</span>{% endif %}{% if event.after is not none %}<span>After: {{ event.after }}</span>{% endif %}</li>{% endfor %}</ol></details>{% endif %}
-
-  <details class="story-documents">
+  <details class="story-documents production-section surface-panel">
     <summary>Story Documents · {{ workspace.documents|selectattr('current')|list|length }} of {{ workspace.documents|length }} types</summary>
     <p class="organization-note">Durable story history stored under <code>Projects/{{ workspace.story_id }}/Documents/</code>. Uploading a replacement creates a new immutable version.</p>
     <div class="document-grid">
@@ -77,7 +50,7 @@
     </div>
   </details>
 
-  <details class="compact-import edit-plan-import">
+  <details class="compact-import edit-plan-import production-section surface-panel">
     <summary>Edit Plan{% if workspace.edit_plan.imported %} · Imported{% else %} · Not imported{% endif %}</summary>
     <form action="{{ url_for('import_edit_plan', workspace_id=workspace.workspace_id) }}" method="post" enctype="multipart/form-data">
       <label>Edit Plan v1 JSON file <input type="file" name="edit_plan" accept="application/json,.json"></label>
@@ -87,6 +60,19 @@
     </form>
     <small>Project recommendations are preserved separately from producer choices. Import requires a selected visual for every beat.</small>
   </details>
+
+      <section class="production-section surface-panel handoff-section"><div class="section-heading"><h3>Storyboard</h3><span class="section-meta">{{ 'Ready' if workspace.storyboard.exists else 'Pending' }}</span></div>{% if workspace.storyboard.exists %}<p class="handoff-status">Storyboard ready.</p><div class="inline-actions"><a class="button-link" href="{{ url_for('view_storyboard', workspace_id=workspace.workspace_id) }}" target="_blank">View</a><form action="{{ url_for('open_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open</button></form><form action="{{ url_for('open_storyboard_folder', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Folder</button></form></div>{% endif %}<form action="{{ url_for('generate_storyboard', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">{{ 'Regenerate Storyboard' if workspace.storyboard.exists else 'Generate Storyboard' }}</button></form></section>
+      <section class="production-section surface-panel handoff-section"><div class="section-heading"><h3>Edit Folder</h3><span class="section-meta">{{ 'Built' if workspace.edit_folder_state.exists else 'Not built' }}</span></div><p class="organization-note">{{ workspace.edit_folder }}</p>{% if workspace.edit_folder_state.manifest_exists %}<p class="handoff-status">Manifest available{% if workspace.edit_folder_state.edit_plan_exists %} · Edit Plan JSON available{% endif %}.</p>{% endif %}<div class="inline-actions"><form action="{{ url_for('open_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Open Edit Folder</button></form><button type="button" data-copy="{{ workspace.edit_folder }}">Copy Path</button><form action="{{ url_for('rebuild_edit', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Rebuild Edit Folder</button></form></div></section>
+      <section class="danger-zone surface-panel"><h3>Danger area</h3><p>Deletes this workspace and its project files only. Master Library assets remain.</p><form action="{{ url_for('delete_workspace', workspace_id=workspace.workspace_id) }}" method="post"><label>Type <code>{{ workspace.story_id }}</code> to confirm <input name="confirm" required></label><button type="submit">Delete workspace</button></form></section>
+    </aside>
+
+    <section class="beats-column">
+      <section class="production-toolbar" aria-label="Story production status">
+        <strong class="toolbar-title" title="{{ workspace.title }}">{{ workspace.title }}</strong>
+        <span class="toolbar-progress"><b>{{ workspace.selected }} / {{ workspace.total }}</b> SELECTED</span>
+        <span class="toolbar-storyboard">{{ 'Storyboard ready' if workspace.storyboard.exists else 'Storyboard pending' }}</span>
+        <div class="toolbar-actions"><button type="button" data-expand-all>Expand All</button><button type="button" data-collapse-completed>Collapse Completed</button></div>
+      </section>
 
   <div class="workspace-layout">
     <nav class="beat-navigator" aria-label="Beat navigator">
@@ -286,5 +272,10 @@
       </article>
       {% endfor %}
     </div>
+  </div>
+    </section>
+    <aside class="story-history-column">
+      {{ history_timeline(workspace.history, older_url=url_for('workspace', workspace_id=workspace.workspace_id, history_offset=workspace.history_offset + workspace.history_page_size) if workspace.history_has_older else none, newer_url=url_for('workspace', workspace_id=workspace.workspace_id, history_offset=[workspace.history_offset - workspace.history_page_size, 0]|max) if workspace.history_has_newer else none) }}
+    </aside>
   </div>
 {% endblock %}

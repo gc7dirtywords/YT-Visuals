@@ -1,0 +1,44 @@
+{% macro status_chip(status) -%}
+  <span class="status-chip status-{{ status }}">{{ status|replace('_', ' ')|title }}</span>
+{%- endmacro %}
+
+{% macro progress(selected, total, label='beats selected') -%}
+  <span class="progress-count"><strong>{{ selected }} / {{ total }}</strong> {{ label }}</span>
+{%- endmacro %}
+
+{% macro history_timeline(history, older_url=None, newer_url=None) -%}
+  <section class="history-panel" aria-label="History">
+    <div class="section-heading"><h2>History</h2><span class="section-meta">Newest first</span></div>
+    {% if history %}
+      <ol class="timeline">
+        {% for event in history %}
+          <li class="timeline-event">
+            <time class="timeline-time" datetime="{{ event.occurred_at.isoformat() }}">
+              <span>{{ event.display_date }}</span>
+              <small>{{ event.display_time }}</small>
+            </time>
+            <div class="timeline-detail">
+              <strong>{{ event.label }}</strong>
+              <span class="timeline-source">{{ event.source|replace('_', ' ') }}</span>
+              {% if event.before is not none or event.after is not none %}
+                <details class="timeline-change">
+                  <summary>View change details</summary>
+                  {% if event.before is not none %}<div><small>Before</small><pre>{{ event.before|tojson(indent=2) }}</pre></div>{% endif %}
+                  {% if event.after is not none %}<div><small>After</small><pre>{{ event.after|tojson(indent=2) }}</pre></div>{% endif %}
+                </details>
+              {% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ol>
+      {% if newer_url or older_url %}
+        <nav class="history-pagination" aria-label="History pages">
+          {% if newer_url %}<a class="button-link" href="{{ newer_url }}">Newer events</a>{% endif %}
+          {% if older_url %}<a class="button-link" href="{{ older_url }}">Older events</a>{% endif %}
+        </nav>
+      {% endif %}
+    {% else %}
+      <p class="empty-state">No production events recorded yet.</p>
+    {% endif %}
+  </section>
+{%- endmacro %}

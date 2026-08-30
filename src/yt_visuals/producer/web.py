@@ -69,7 +69,7 @@ def create_app(
     def release_detail(release_id: str) -> str:
         return render_template(
             "release.html",
-            release=service.get_release(release_id),
+            release=service.get_release(release_id, history_offset=_history_offset()),
             thumbnail_candidates=service.list_thumbnail_candidates(),
         )
 
@@ -254,6 +254,7 @@ def create_app(
                 local_beat_id=request.args.get("local_beat"),
                 sfx_query=request.args.get("sfx_query", ""),
                 sfx_beat_id=request.args.get("sfx_beat"),
+                history_offset=_history_offset(),
             ),
             focused_beat=request.args.get("focus"),
             open_panel=request.args.get("panel"),
@@ -394,6 +395,14 @@ def create_app(
     @app.post("/stories/<workspace_id>/organization/order/<direction>")
     def move_workspace_release(workspace_id: str, direction: str):
         service.move_workspace_release_position(workspace_id, -1 if direction == "up" else 1); flash("Release story order updated.", "success")
+        return_to_release = request.form.get("return_to_release")
+        workspace_detail = service.get_workspace(workspace_id, include_candidates=False)
+        if (
+            return_to_release
+            and workspace_detail["release"]
+            and return_to_release == workspace_detail["release"]["id"]
+        ):
+            return redirect(url_for("release_detail", release_id=return_to_release))
         return redirect(url_for("workspace", workspace_id=workspace_id))
 
     @app.post("/stories/<workspace_id>/delete")
@@ -665,6 +674,14 @@ def _error_target(service: ProducerWorkflowService) -> str:
         except ProducerWorkflowError:
             pass
     return request.referrer or url_for("index")
+
+
+def _history_offset() -> int:
+    """Read a bounded, non-negative history page offset from the query string."""
+    try:
+        return min(max(int(request.args.get("history_offset", "0")), 0), 1_000_000)
+    except ValueError:
+        return 0
 
 
 def run_web_app(

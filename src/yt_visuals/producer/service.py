@@ -308,6 +308,7 @@ class ProducerWorkflowService:
         local_beat_id: str | None = None,
         sfx_query: str = "",
         sfx_beat_id: str | None = None,
+        history_offset: int = 0,
     ) -> dict[str, Any]:
         with Session(self.engine) as session:
             workspace = session.scalar(
@@ -338,6 +339,10 @@ class ProducerWorkflowService:
                 }
                 for beat in workspace.beats
             ]
+            history_page = self._event_page(
+                session, "workspace", workspace.id, offset=history_offset
+            )
+            edit_folder = self.edit_folder(workspace.story_external_id)
             result = {
                 "workspace_id": workspace.id,
                 "story_id": workspace.story_external_id,
@@ -346,7 +351,12 @@ class ProducerWorkflowService:
                 "release": self._release_view(workspace.video_release),
                 "release_position": workspace.release_position,
                 "release_count": len(workspace.video_release.workspaces) if workspace.video_release else 0,
-                "edit_folder": str(self.edit_folder(workspace.story_external_id)),
+                "edit_folder": str(edit_folder),
+                "edit_folder_state": {
+                    "exists": edit_folder.is_dir(),
+                    "manifest_exists": (edit_folder / "manifest.csv").is_file(),
+                    "edit_plan_exists": (edit_folder / "edit_plan.json").is_file(),
+                },
                 "storyboard": self._storyboard_view(workspace.story_external_id),
                 "edit_plan": {
                     "imported": workspace.edit_plan_json is not None,
@@ -358,7 +368,7 @@ class ProducerWorkflowService:
                 "selected_sfx": sum(1 for row in rows if row["selected_sfx_asset_id"]),
                 "total": len(rows),
                 "beats": rows,
-                "history": self._event_views(session, "workspace", workspace.id),
+                **history_page,
             }
 
         reuse_groups = self._reuse_groups(workspace_id, result["release"])
@@ -771,7 +781,7 @@ class ProducerWorkflowService:
             releases.sort(key=self._release_sort_key)
             return [self._release_detail(release) for release in releases]
 
-    def get_release(self, release_id: str) -> dict[str, Any]:
+    def get_release(self, release_id: str, *, history_offset: int = 0) -> dict[str, Any]:
         with Session(self.engine) as session:
             release = session.scalar(
                 select(VideoRelease)
@@ -786,7 +796,9 @@ class ProducerWorkflowService:
             if release is None:
                 raise ProducerWorkflowError("video release was not found")
             detail = self._release_detail(release)
-            detail["history"] = self._event_views(session, "release", release.id)
+            detail.update(
+                self._event_page(session, "release", release.id, offset=history_offset)
+            )
             return detail
 
     @staticmethod
@@ -864,9 +876,15 @@ class ProducerWorkflowService:
         )
 
     @staticmethod
-    def _event_views(
-        session: Session, subject_type: str, subject_id: str, *, limit: int = 30
-    ) -> list[dict[str, Any]]:
+    def _event_page(
+        session: Session,
+        subject_type: str,
+        subject_id: str,
+        *,
+        offset: int = 0,
+        limit: int = 30,
+    ) -> dict[str, Any]:
+        offset = max(0, offset)
         events = list(
             session.scalars(
                 select(ProductionEvent)
@@ -875,21 +893,33 @@ class ProducerWorkflowService:
                     ProductionEvent.subject_id == subject_id,
                 )
                 .order_by(ProductionEvent.occurred_at.desc(), ProductionEvent.id.desc())
-                .limit(limit)
+                .offset(offset)
+                .limit(limit + 1)
             )
         )
-        return [
-            {
+        has_older = len(events) > limit
+        events = events[:limit]
+        history = []
+        for item in events:
+            occurred_at = _local_display_datetime(item.occurred_at)
+            history.append({
                 "id": item.id,
                 "event_type": item.event_type,
                 "label": item.event_type.replace(".", " ").replace("_", " ").title(),
-                "occurred_at": item.occurred_at,
+                "occurred_at": occurred_at,
+                "display_date": occurred_at.strftime("%b %d, %Y"),
+                "display_time": occurred_at.strftime("%I:%M %p").lstrip("0"),
                 "source": item.source,
                 "before": item.payload_json.get("before"),
                 "after": item.payload_json.get("after"),
-            }
-            for item in events
-        ]
+            })
+        return {
+            "history": history,
+            "history_offset": offset,
+            "history_has_newer": offset > 0,
+            "history_has_older": has_older,
+            "history_page_size": limit,
+        }
 
     def create_release(self, name: str) -> dict[str, Any]:
         clean = name.strip()
@@ -2502,6 +2532,16 @@ def _file_sha256(path: Path) -> str:
     except OSError as exc:
         raise ProducerWorkflowError("uploaded document could not be read") from exc
     return digest.hexdigest()
+
+
+def _local_display_datetime(value: datetime) -> datetime:
+    """Convert a persisted UTC event time to the host's local display timezone."""
+    utc_value = (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
+    return utc_value.astimezone()
 
 
 def _assert_within(path: Path, parent: Path) -> None:
