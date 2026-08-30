@@ -663,6 +663,68 @@ def test_external_import_feedback_keeps_target_beat_and_panel_open(
     engine.dispose()
 
 
+def test_pexels_import_feedback_keeps_video_url_and_target_beat_open(
+    catalog_settings: Settings, monkeypatch
+) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    video_url = "https://www.pexels.com/video/creepy-night-road-in-forest-18138981/"
+    import_pexels_page = service.import_pexels_page
+    calls: list[tuple[str, str, str]] = []
+
+    rendered = client.get(f"/stories/{workspace['workspace_id']}")
+    form_match = re.search(
+        rb'<form action="([^" ]+/pexels)" method="post">\s*'
+        rb'<input type="url" name="source_url"[^>]*>\s*'
+        rb'<button type="submit">Import &amp; Use</button>',
+        rendered.data,
+    )
+    assert form_match is not None
+    action = form_match.group(1).decode()
+    assert action == f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/pexels"
+
+    def imported(workspace_id: str, beat_id: str, source_url: str) -> dict[str, int]:
+        calls.append((workspace_id, beat_id, source_url))
+        return {"asset_id": 91}
+
+    monkeypatch.setattr(service, "import_pexels_page", imported)
+    success = client.post(
+        action,
+        data={"source_url": video_url},
+        follow_redirects=True,
+    )
+    assert calls == [(workspace["workspace_id"], beat["id"], video_url)]
+    assert b"Pexels media acquired and selected." in success.data
+    assert b'<details class="sourcing-panel pexels" open>' in success.data
+    assert b'<details class="beat-disclosure" open>' in success.data
+
+    def unavailable(*args, **kwargs):
+        raise ProviderConnectionError("Pexels connection failed")
+
+    monkeypatch.setattr(service, "import_pexels_page", unavailable)
+    failure = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/pexels",
+        data={"source_url": video_url},
+        follow_redirects=True,
+    )
+    assert b"Pexels import could not be completed: Pexels connection failed" in failure.data
+    assert video_url.encode() in failure.data
+    assert b'role="alert"' in failure.data
+    assert b'<details class="sourcing-panel pexels" open>' in failure.data
+    assert b'<details class="beat-disclosure" open>' in failure.data
+
+    monkeypatch.setattr(service, "import_pexels_page", import_pexels_page)
+    malformed_url = "https://www.pexels.com/video/creepy-night-road/"
+    malformed = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/pexels",
+        data={"source_url": malformed_url},
+        follow_redirects=True,
+    )
+    assert b"Pexels import could not be completed: the URL is not a recognized Pexels photo or video page" in malformed.data
+    assert malformed_url.encode() in malformed.data
+    assert b'<details class="sourcing-panel pexels" open>' in malformed.data
+    engine.dispose()
+
+
 def test_completed_beats_default_collapsed_and_focus_expands(catalog_settings: Settings) -> None:
     engine, _app, client, _service, workspace, beat = _workspace_client(catalog_settings)
     client.post(

@@ -15,7 +15,7 @@ from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm import Session
 import yt_visuals.producer.service as producer_service_module
 
-from yt_visuals.acquisition import AcquisitionService, ProbeResult
+from yt_visuals.acquisition import AcquisitionOutcome, AcquisitionService, ProbeResult
 from yt_visuals.config import Settings
 from yt_visuals.database import initialize_database
 from yt_visuals.library import LibraryScanner
@@ -353,6 +353,9 @@ def test_pexels_page_parser_and_manual_import_reuse_hardened_acquisition(
     assert parse_pexels_page_url(
         "https://www.pexels.com/photo/dark-fireplace-7001/"
     ) == ("image", "7001")
+    assert parse_pexels_page_url(
+        "https://www.pexels.com/video/creepy-night-road-in-forest-18138981/"
+    ) == ("video", "18138981")
     assert parse_pexels_page_url("https://pexels.com/video/fire-8002/") == (
         "video",
         "8002",
@@ -361,6 +364,10 @@ def test_pexels_page_parser_and_manual_import_reuse_hardened_acquisition(
         parse_pexels_page_url("http://www.pexels.com/photo/test-1/")
     with pytest.raises(ProducerWorkflowError, match="not a recognized"):
         parse_pexels_page_url("https://www.pexels.com/search/fireplace/")
+    with pytest.raises(ProducerWorkflowError, match="not a recognized"):
+        parse_pexels_page_url("https://www.pexels.com/video/creepy-night-road/")
+    with pytest.raises(ProducerWorkflowError, match="only HTTPS Pexels"):
+        parse_pexels_page_url("https://example.test/video/creepy-night-18138981/")
 
     engine = initialize_database(catalog_settings)
     calls: list[str] = []
@@ -424,6 +431,93 @@ def test_pexels_page_parser_and_manual_import_reuse_hardened_acquisition(
     assert selected["source"]["provider"] == "pexels"
     assert selected["license"]["name"] == "Pexels License"
     client.close()
+    engine.dispose()
+
+
+def test_pexels_video_page_uses_video_detail_and_selects_acquired_asset(
+    catalog_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = initialize_database(catalog_settings)
+    provider_calls: list[str] = []
+    acquired: list[MediaSearchResult] = []
+    selected: list[tuple[str, str, int]] = []
+    video_url = "https://www.pexels.com/video/creepy-night-road-in-forest-18138981/"
+    result = MediaSearchResult(
+        provider="pexels",
+        provider_asset_id="18138981",
+        media_type="video",
+        title="Creepy night road in forest",
+        description=None,
+        creator_name="Creator",
+        creator_url="https://www.pexels.com/@creator",
+        source_url=video_url,
+        download_url="https://videos.pexels.com/video-files/18138981/road.mp4",
+        preview_url=None,
+        width=1920,
+        height=1080,
+        duration_ms=12_000,
+        mime_type="video/mp4",
+        license_name="Pexels License",
+        license_url="https://www.pexels.com/legal-pages/license/",
+        attribution_required=False,
+        attribution_text="Video by Creator on Pexels",
+        raw_metadata={"id": 18138981},
+        commercial_use_allowed=True,
+        modifications_allowed=True,
+    )
+
+    class FakeProvider:
+        info = ProviderInfo("pexels", "Pexels", None, None, None, None, False)
+
+        def get_photo(self, asset_id: str) -> MediaSearchResult:
+            raise AssertionError("video URL must not fetch a photo")
+
+        def get_video(self, asset_id: str) -> MediaSearchResult:
+            provider_calls.append(asset_id)
+            return result
+
+        def close(self) -> None:
+            return None
+
+    class FakeAcquisition:
+        def lookup_existing(self, provider: str, media_type: str, asset_id: str):
+            assert (provider, media_type, asset_id) == ("pexels", "video", "18138981")
+            return None
+
+        def acquire(self, candidate: MediaSearchResult) -> AcquisitionOutcome:
+            acquired.append(candidate)
+            return AcquisitionOutcome(
+                asset_id=77,
+                relative_path="Library/Videos/pexels-video-18138981.mp4",
+                sha256="a" * 64,
+                file_size_bytes=123,
+                created_asset=True,
+                created_source=True,
+            )
+
+        def close(self) -> None:
+            return None
+
+    service = ProducerWorkflowService(
+        catalog_settings,
+        engine,
+        provider_factory=lambda name, settings: FakeProvider(),
+        acquisition_factory=lambda settings, supplied: FakeAcquisition(),
+    )
+    imported = service.import_plan(_plan())
+    beat = service.get_workspace(imported["workspace_id"], include_candidates=False)["beats"][0]
+    monkeypatch.setattr(
+        service,
+        "select_asset",
+        lambda workspace_id, beat_id, asset_id: selected.append((workspace_id, beat_id, asset_id)),
+    )
+
+    outcome = service.import_pexels_page(imported["workspace_id"], beat["id"], video_url)
+
+    assert provider_calls == ["18138981"]
+    assert acquired == [result]
+    assert selected == [(imported["workspace_id"], beat["id"], 77)]
+    assert outcome["media_type"] == "video"
     engine.dispose()
 
 

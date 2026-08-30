@@ -246,9 +246,12 @@
             <summary>Pexels</summary>
             <div class="sourcing-body">
               <form action="{{ url_for('import_pexels', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post">
-                <input type="url" name="source_url" placeholder="https://www.pexels.com/photo/...-12345/" required>
+                <input type="url" name="source_url" value="{{ request.args.get('pexels_url', '') if request.args.get('pexels_beat') == beat.id else '' }}" placeholder="https://www.pexels.com/photo/...-12345/" aria-label="Pexels photo or video page URL" required>
                 <button type="submit">Import &amp; Use</button>
               </form>
+              {% if focused_beat == beat.beat_id and request.args.get('pexels_error') %}
+                <p class="import-feedback error" role="alert">{{ request.args.get('pexels_error') }}</p>
+              {% endif %}
               <small>Only Pexels photo and video page URLs are supported; arbitrary page scraping is intentionally disabled.</small>
             </div>
           </details>

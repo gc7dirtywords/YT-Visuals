@@ -475,7 +475,39 @@ def create_app(
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/pexels")
     def import_pexels(workspace_id: str, beat_id: str):
-        service.import_pexels_page(workspace_id, beat_id, request.form.get("source_url", ""))
+        source_url = request.form.get("source_url", "").strip()
+        try:
+            service.import_pexels_page(workspace_id, beat_id, source_url)
+        except (ProducerWorkflowError, ProviderError) as exc:
+            message = f"Pexels import could not be completed: {_concise(exc)}"
+            flash(message, "error")
+            return redirect(
+                _beat_location(
+                    service,
+                    workspace_id,
+                    beat_id,
+                    panel="pexels",
+                    pexels_url=source_url,
+                    pexels_beat=beat_id,
+                    pexels_error=message,
+                )
+            )
+        except Exception:
+            message = (
+                "Pexels import could not be completed due to an unexpected error. Please try again."
+            )
+            flash(message, "error")
+            return redirect(
+                _beat_location(
+                    service,
+                    workspace_id,
+                    beat_id,
+                    panel="pexels",
+                    pexels_url=source_url,
+                    pexels_beat=beat_id,
+                    pexels_error=message,
+                )
+            )
         flash("Pexels media acquired and selected.", "success")
         return _beat_redirect(service, workspace_id, beat_id, panel="pexels")
 

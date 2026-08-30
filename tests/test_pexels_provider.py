@@ -165,8 +165,8 @@ def test_get_photo_and_video_use_current_v1_endpoints() -> None:
 
     provider = provider_for(httpx.MockTransport(handler))
     assert provider.get_photo("2014422").media_type == "image"
-    assert provider.get_video("2499611").media_type == "video"
-    assert paths == ["/v1/photos/2014422", "/v1/videos/videos/2499611"]
+    assert provider.get_video("18138981").media_type == "video"
+    assert paths == ["/v1/photos/2014422", "/v1/videos/videos/18138981"]
 
 
 def test_missing_api_key_is_clear(monkeypatch: pytest.MonkeyPatch) -> None:
