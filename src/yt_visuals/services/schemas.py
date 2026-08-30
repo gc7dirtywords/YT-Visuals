@@ -15,7 +15,7 @@ class ServiceModel(BaseModel):
 
 class SearchMediaRequest(ServiceModel):
     query: str = ""
-    media_type: Literal["image", "video"] | None = None
+    media_type: Literal["image", "video", "audio"] | None = None
     orientation: Literal["landscape", "portrait", "square"] | None = None
     mime_type: str | None = None
     min_width: int | None = Field(default=None, gt=0)
@@ -104,7 +104,8 @@ class SearchCandidateResult(ServiceModel):
     asset_id: int
     relative_path: str
     current_location: str | None
-    media_type: Literal["image", "video"]
+    media_type: Literal["image", "video", "audio"]
+    sfx_kind: Literal["one_shot", "ambient"] | None = None
     mime_type: str | None
     extension: str
     width: int | None
@@ -133,7 +134,8 @@ class AssetDetailResult(ServiceModel):
     asset_id: int
     relative_path: str
     current_location: str | None
-    media_type: Literal["image", "video"]
+    media_type: Literal["image", "video", "audio"]
+    sfx_kind: Literal["one_shot", "ambient"] | None = None
     mime_type: str | None
     extension: str
     width: int | None
@@ -165,6 +167,7 @@ class LibraryStatusResult(ServiceModel):
     missing_assets: int
     images: int
     videos: int
+    audio: int
     available_locations: int
     missing_locations: int
     duplicate_physical_locations: int

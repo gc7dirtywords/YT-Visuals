@@ -118,6 +118,7 @@ class MediaCatalogService:
                     relative_path=asset.relative_path,
                     current_location=_current_location(asset),
                     media_type=asset.media_type,
+                    sfx_kind=asset.sfx_kind,
                     mime_type=asset.mime_type,
                     extension=PurePosixPath(asset.relative_path).suffix.lower(),
                     width=asset.width,
@@ -180,6 +181,9 @@ class MediaCatalogService:
                     ),
                     videos=scalar_count(
                         select(func.count()).select_from(MediaAsset).where(MediaAsset.media_type == "video")
+                    ),
+                    audio=scalar_count(
+                        select(func.count()).select_from(MediaAsset).where(MediaAsset.media_type == "audio")
                     ),
                     available_locations=sum(counts.values()),
                     missing_locations=scalar_count(
@@ -380,6 +384,7 @@ class MediaCatalogService:
             relative_path=asset.relative_path,
             current_location=_current_location(asset),
             media_type=asset.media_type,
+            sfx_kind=asset.sfx_kind,
             mime_type=asset.mime_type,
             extension=PurePosixPath(asset.relative_path).suffix.lower(),
             width=asset.width,

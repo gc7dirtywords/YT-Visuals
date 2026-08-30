@@ -17,7 +17,17 @@ A small valid example is [`examples/visual-plan.v1.json`](../examples/visual-pla
 - `media_preference` is `image`, `video`, or `either`.
 - `source_requirement` is `representative` or `exact`.
 - Production opportunities are optional. Each requires a narration-specific trigger and
-  at least one real `sfx_suggestion` or `edit_suggestion`.
+  at least one real `sfx_suggestion`, structured `sfx_recommendation`, or `edit_suggestion`.
+
+## Structured SFX recommendations
+
+An opportunity may include `sfx_recommendation` with `type: "sfx"`, `purpose`,
+`sfx_kind` (`one_shot` or `ambient`), `desired_sound`, one or more explicit
+`search_queries`, `intensity`, and an optional `note`. The recommendation is supplied by
+the ChatGPT Project and remains advisory. YT-Visuals stores and displays it but never
+derives SFX guidance from narration, keywords, duration, visual content, or headings.
+
+The older free-text `sfx_suggestion` remains valid for existing Visual Plan v1 files.
 
 Production opportunities are recommendations only. They must describe a concrete action
 or event in the narration, not generic mood, pacing, transition, camera, or directing

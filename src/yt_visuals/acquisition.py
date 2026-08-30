@@ -55,6 +55,12 @@ IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
 VIDEO_MIME_TYPES = frozenset(
     {"video/mp4", "video/webm", "video/quicktime", "video/x-m4v", "video/x-matroska"}
 )
+AUDIO_MIME_TYPES = frozenset(
+    {
+        "audio/wav", "audio/wave", "audio/x-wav", "audio/x-pn-wav",
+        "audio/vnd.wave", "audio/mpeg", "audio/mp3", "audio/flac", "audio/x-flac",
+    }
+)
 PEXELS_POLICY_REVIEWED_AT = datetime(2026, 8, 25, tzinfo=timezone.utc)
 
 
@@ -63,6 +69,10 @@ class ProbeResult:
     width: int | None = None
     height: int | None = None
     duration_ms: int | None = None
+    audio_codec: str | None = None
+    sample_rate: int | None = None
+    channels: int | None = None
+    container: str | None = None
     raw_metadata: dict[str, Any] | None = None
     warning: str | None = None
 
@@ -113,10 +123,14 @@ class AcquisitionContext:
 @dataclass(frozen=True, slots=True)
 class ObservedMedia:
     mime_type: str
-    width: int
-    height: int
+    width: int | None
+    height: int | None
     duration_ms: int | None = None
     probe_metadata: dict[str, Any] | None = None
+    audio_codec: str | None = None
+    sample_rate: int | None = None
+    channels: int | None = None
+    container: str | None = None
 
 
 class _TransferFailure(MediaDownloadError):
@@ -179,6 +193,10 @@ def probe_media_file(path: Path) -> ProbeResult:
         (stream for stream in streams if isinstance(stream, dict) and stream.get("codec_type") == "video"),
         {},
     )
+    audio_stream = next(
+        (stream for stream in streams if isinstance(stream, dict) and stream.get("codec_type") == "audio"),
+        {},
+    )
     width = _positive_int(video_stream.get("width"))
     height = _positive_int(video_stream.get("height"))
     duration = video_stream.get("duration")
@@ -188,12 +206,16 @@ def probe_media_file(path: Path) -> ProbeResult:
         width=width,
         height=height,
         duration_ms=_duration_ms(duration),
+        audio_codec=audio_stream.get("codec_name") if isinstance(audio_stream.get("codec_name"), str) else None,
+        sample_rate=_positive_int_from_string(audio_stream.get("sample_rate")),
+        channels=_positive_int(audio_stream.get("channels")),
+        container=(payload.get("format") or {}).get("format_name") if isinstance(payload.get("format"), dict) else None,
         raw_metadata=payload,
     )
 
 
 def safe_filename(result: MediaSearchResult, mime_type: str | None, sha256: str) -> str:
-    kind = "photo" if result.media_type == "image" else "video"
+    kind = {"image": "photo", "video": "video", "audio": "sfx"}[result.media_type]
     label = result.title or result.creator_name or kind
     normalized = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", normalized).strip("-").lower()[:60] or "asset"
@@ -264,9 +286,7 @@ class AcquisitionService:
             try:
                 staging = _safe_root_relative(self.settings.root, metadata["staging_relative_path"])
                 destination = _safe_root_relative(self.settings.root, metadata["intended_relative_path"])
-                allowed_parent = self.settings.root / "Library" / (
-                    "Images" if history.media_type == "image" else "Videos"
-                )
+                allowed_parent = self.settings.root / "Library" / _library_directory(history.media_type)
                 destination.resolve(strict=False).relative_to(allowed_parent.resolve())
                 if not destination.is_file() and staging.is_file():
                     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -838,11 +858,11 @@ class AcquisitionService:
         byte_count = 0
         content_type: str | None = None
         http_status_code: int | None = None
-        limit = (
-            self.settings.max_image_download_bytes
-            if result.media_type == "image"
-            else self.settings.max_video_download_bytes
-        )
+        limit = {
+            "image": self.settings.max_image_download_bytes,
+            "video": self.settings.max_video_download_bytes,
+            "audio": self.settings.max_audio_download_bytes,
+        }[result.media_type]
         try:
             with handle:
                 try:
@@ -981,6 +1001,38 @@ class AcquisitionService:
                 raise _TransferFailure("mime_mismatch", "Downloaded image MIME does not match its bytes")
             return ObservedMedia(observed_mime, width, height)
 
+        if result.media_type == "audio":
+            if declared not in AUDIO_MIME_TYPES:
+                raise _TransferFailure(
+                    "mime_mismatch",
+                    "Downloaded response is not an approved audio MIME type",
+                    http_status_code=downloaded.http_status_code,
+                    content_type=downloaded.content_type,
+                    downloaded_bytes=downloaded.file_size_bytes,
+                    sha256=downloaded.sha256,
+                )
+            probe = self.metadata_probe(downloaded.temporary_path)
+            if (
+                probe.warning
+                or not probe.audio_codec
+                or probe.duration_ms is None
+                or probe.duration_ms <= 0
+                or probe.sample_rate is None
+                or probe.channels is None
+            ):
+                raise _TransferFailure(
+                    "invalid_audio",
+                    "Downloaded audio could not be probed as usable media",
+                    http_status_code=downloaded.http_status_code,
+                    content_type=downloaded.content_type,
+                    downloaded_bytes=downloaded.file_size_bytes,
+                    sha256=downloaded.sha256,
+                )
+            return ObservedMedia(
+                declared, None, None, probe.duration_ms, probe.raw_metadata,
+                probe.audio_codec, probe.sample_rate, probe.channels, probe.container,
+            )
+
         if declared not in VIDEO_MIME_TYPES:
             raise _TransferFailure(
                 "mime_mismatch",
@@ -1098,9 +1150,7 @@ class AcquisitionService:
             license_record.verified_at = reviewed_at
 
     def _destination_path(self, result: MediaSearchResult, filename: str) -> Path:
-        directory = self.settings.root / "Library" / (
-            "Images" if result.media_type == "image" else "Videos"
-        )
+        directory = self.settings.root / "Library" / _library_directory(result.media_type)
         candidate = directory / filename
         counter = 2
         while candidate.exists():
@@ -1116,7 +1166,7 @@ class AcquisitionService:
 
 
 def _catalog_source_id(media_type: str, provider_asset_id: str) -> str:
-    kind = "photo" if media_type == "image" else "video"
+    kind = {"image": "photo", "video": "video", "audio": "audio"}[media_type]
     return f"{kind}:{provider_asset_id}"
 
 
@@ -1171,6 +1221,15 @@ def _extension_for(mime_type: str | None, url: str) -> str:
         "video/x-matroska": ".mkv",
         "video/webm": ".webm",
         "video/quicktime": ".mov",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/wave": ".wav",
+        "audio/x-pn-wav": ".wav",
+        "audio/vnd.wave": ".wav",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/flac": ".flac",
+        "audio/x-flac": ".flac",
     }
     if mime_type:
         normalized = mime_type.split(";", 1)[0].strip().lower()
@@ -1186,6 +1245,18 @@ def _extension_for(mime_type: str | None, url: str) -> str:
 def _original_filename(url: str) -> str | None:
     name = unquote(Path(urlsplit(url).path).name).strip()
     return name[:512] or None
+
+
+def _library_directory(media_type: str) -> str:
+    return {"image": "Images", "video": "Videos", "audio": "SFX"}[media_type]
+
+
+def _positive_int_from_string(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _search_provenance(context: AcquisitionContext | None) -> dict[str, Any]:

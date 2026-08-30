@@ -63,6 +63,43 @@ def _jpeg() -> io.BytesIO:
     return stream
 
 
+def test_selected_sfx_uses_native_audio_controls_without_autoplay(
+    catalog_settings: Settings,
+) -> None:
+    engine = initialize_database(catalog_settings)
+    service = ProducerWorkflowService(catalog_settings, engine)
+    from yt_visuals.producer.contracts import VisualPlan
+
+    imported = service.import_plan(VisualPlan.model_validate_json(_plan_bytes()))
+    beat = service.get_workspace(imported["workspace_id"], include_candidates=False)["beats"][0]
+    path = catalog_settings.root / "Library/SFX/preview.wav"
+    path.write_bytes(b"preview bytes")
+    with Session(engine) as session:
+        asset = MediaAsset(
+            relative_path="Library/SFX/preview.wav", media_type="audio",
+            sfx_kind="one_shot", status="active", title="Preview hit",
+            mime_type="audio/wav", file_size_bytes=path.stat().st_size,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(), duration_ms=800,
+        )
+        session.add(asset)
+        session.flush()
+        session.add(MediaLocation(
+            asset=asset, relative_path=asset.relative_path, status="available",
+            provenance_type="local_import", file_size_bytes=path.stat().st_size,
+        ))
+        session.commit()
+        asset_id = asset.id
+    service.select_sfx(imported["workspace_id"], beat["id"], asset_id)
+
+    app = create_app(catalog_settings, engine=engine, service=service)
+    app.config.update(TESTING=True)
+    response = app.test_client().get(f"/stories/{imported['workspace_id']}")
+    assert response.status_code == 200
+    assert b"<audio" in response.data and b"controls" in response.data
+    assert b"autoplay" not in response.data
+    engine.dispose()
+
+
 def test_web_plan_import_workspace_and_upload_selection(catalog_settings: Settings) -> None:
     engine = initialize_database(catalog_settings)
     app = create_app(catalog_settings, engine=engine)
@@ -93,6 +130,22 @@ def test_web_plan_import_workspace_and_upload_selection(catalog_settings: Settin
     assert b"License: UNKNOWN" in uploaded.data
     assert b'class="selected" data-beat-link="beat-001"' in uploaded.data
     assert client.get("/static/producer.css").status_code == 200
+    engine.dispose()
+
+
+def test_web_plan_import_accepts_direct_json_paste(catalog_settings: Settings) -> None:
+    engine = initialize_database(catalog_settings)
+    app = create_app(catalog_settings, engine=engine)
+    app.config.update(TESTING=True)
+    response = app.test_client().post(
+        "/plans",
+        data={"visual_plan_json": _plan_bytes().decode("utf-8")},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"Web Story" in response.data
+    assert b"Visual Plan imported" in response.data
+    assert len(app.extensions["producer_service"].list_workspaces()) == 1
     engine.dispose()
 
 
@@ -563,7 +616,7 @@ def test_dashboard_organization_and_delete_confirmation(catalog_settings: Settin
     engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
     release = service.create_release("EP0001")
     service.assign_workspace_release(workspace["workspace_id"], release["id"])
-    service.update_workspace_status(workspace["workspace_id"], "completed")
+    service.update_release_metadata(release["id"], status="released", release_date=None)
     dashboard = client.get("/?show_finished=1")
     assert b"In Production" in dashboard.data and b"Planned" in dashboard.data and b"Completed" in dashboard.data
     assert b"EP0001" in dashboard.data
@@ -614,6 +667,112 @@ def test_rendered_release_form_create_list_assign_and_refresh(catalog_settings: 
     engine.dispose()
 
 
+def test_release_presentation_and_history_render_without_internal_title_synthesis(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    uploaded = client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/upload",
+        data={"media_file": (_jpeg(), "release-thumb.jpg")},
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert uploaded.status_code == 200
+    with Session(engine) as session:
+        asset_id = session.scalar(select(MediaAsset.id).where(MediaAsset.media_type == "image"))
+    assert asset_id is not None
+    release = service.create_release("Internal Only Name")
+    empty = client.get(f"/releases/{release['id']}")
+    presentation_section = re.search(
+        rb'<section class="presentation-panel">(.*?)</section>', empty.data, re.DOTALL
+    )
+    assert presentation_section is not None
+    assert b'name="public_title" value=""' in presentation_section.group(1)
+    assert b"internal release name is not used as a public title" in presentation_section.group(1)
+
+    saved = client.post(
+        f"/releases/{release['id']}/presentation",
+        data={
+            "public_title": "Public Release Title",
+            "description": "Public description",
+            "thumbnail_asset_id": str(asset_id),
+            "change_note": "Initial presentation",
+        },
+        follow_redirects=True,
+    )
+    assert saved.status_code == 200
+    assert b"Public Release Title" in saved.data
+    assert b"Presentation history (1)" in saved.data
+    assert b"Release history" in saved.data
+    workspace_page = client.get(f"/stories/{workspace['workspace_id']}")
+    assert b"Workspace history" in workspace_page.data
+    engine.dispose()
+
+
+def test_release_thumbnail_upload_reuses_library_ingestion_and_sectioned_ui(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, _workspace, _beat = _workspace_client(catalog_settings)
+    release = service.create_release("Thumbnail upload release")
+    title = client.post(
+        f"/releases/{release['id']}/presentation/title",
+        data={"public_title": "A Public Title"},
+        follow_redirects=True,
+    )
+    assert title.status_code == 200
+    description = client.post(
+        f"/releases/{release['id']}/presentation/description",
+        data={"description": "A deliberately long public description. " * 12},
+        follow_redirects=True,
+    )
+    assert description.status_code == 200
+    stream = io.BytesIO()
+    Image.new("RGB", (160, 90), "teal").save(stream, format="PNG")
+    stream.seek(0)
+    uploaded = client.post(
+        f"/releases/{release['id']}/presentation/thumbnail/upload",
+        data={"thumbnail_file": (stream, "fresh-thumbnail.png")},
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert uploaded.status_code == 200
+    assert b"Thumbnail uploaded, cataloged, and selected" in uploaded.data
+    assert b"Choose existing" in uploaded.data
+    assert b"Add thumbnail" in uploaded.data
+    assert b"Show More" in uploaded.data
+    assert b"YT-ChannelOps" in uploaded.data
+    detail = service.get_release(release["id"])
+    thumbnail_id = detail["presentation"]["thumbnail_asset_id"]
+    assert thumbnail_id is not None
+    with Session(engine) as session:
+        asset = session.get(MediaAsset, thumbnail_id)
+        assert asset is not None
+        assert asset.media_type == "image"
+        assert asset.relative_path.startswith("Library/Images/upload-fresh-thumbnail-")
+        assert any(source.original_filename == "fresh-thumbnail.png" for source in asset.sources)
+        assert session.scalar(
+            select(ProducerBeat).where(ProducerBeat.selected_asset_id == thumbnail_id)
+        ) is None
+    engine.dispose()
+
+
+def test_released_release_is_not_rendered_as_assignment_option(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
+    released = service.create_release("Already released")
+    active = service.create_release("Still active")
+    service.update_release_metadata(released["id"], status="released", release_date=None)
+    page = client.get(f"/stories/{workspace['workspace_id']}")
+    assignment = re.search(
+        rb'<select name="release_id">(.*?)</select>', page.data, re.DOTALL
+    )
+    assert assignment is not None
+    assert active["id"].encode() in assignment.group(1)
+    assert released["id"].encode() not in assignment.group(1)
+    engine.dispose()
+
+
 def test_compact_import_navigation_release_metadata_and_finished_filter(catalog_settings: Settings) -> None:
     engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
     dashboard = client.get("/")
@@ -637,7 +796,6 @@ def test_compact_import_navigation_release_metadata_and_finished_filter(catalog_
     assert b"Workspaces" in detail.data
     workspace_page = client.get(f"/stories/{workspace['workspace_id']}")
     assert b"Workspaces" in workspace_page.data and b"Release metadata" in workspace_page.data
-    service.update_workspace_status(workspace["workspace_id"], "completed")
     service.update_release_metadata(release["id"], status="released", release_date="2026-10-31")
     hidden = client.get("/")
     shown = client.get("/?show_finished=1")

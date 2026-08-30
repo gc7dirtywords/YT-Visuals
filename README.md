@@ -46,10 +46,15 @@ web-page scraping and arbitrary direct-media downloads are intentionally unsuppo
 Local image/video uploads are validated with the existing media inspectors, SHA-256
 deduplicated, cataloged as local imports, and assigned no invented license.
 
+Project-supplied structured SFX recommendations remain advisory. WAV, MP3, and FLAC
+masters are validated with ffprobe and share the same catalog, SHA-256 identity,
+provenance, license, and reuse behavior under `Library/SFX`. The producer may select,
+replace, or remove one primary SFX per beat; the app does not infer recommendations.
+
 The workspace builds a DaVinci-ready folder at `Projects/<story_id>/Edit/`. Its `Visuals`
-folder contains only current selections in stable beat order, using same-filesystem hard
-links where possible and safe copies otherwise. `manifest.csv` records beat, asset,
-source, creator, and license context. Rebuilding never mutates Library masters. The
+and `SFX` folders contain current selections in stable beat order, using same-filesystem
+hard links where possible and safe copies otherwise. `manifest.csv` records beat, media
+role, edit path, asset, source, creator, and license context. Rebuilding never mutates Library masters. The
 producer storyboard is written to `Edit/storyboard.pdf` and clearly includes both
 selected and unselected beats without requiring an alignment score or automated review.
 

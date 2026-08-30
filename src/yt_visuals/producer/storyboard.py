@@ -99,6 +99,22 @@ def _render_beat(
             for item in opportunities
         )
         y = _labeled(pdf, "Optional production", text, 42, y - 4, 528)
+    recommendations = beat.get("sfx_recommendations", [])
+    if recommendations:
+        recommendation = recommendations[0]
+        detail = recommendation.get("desired_sound", "")
+        if recommendation.get("purpose"):
+            detail += f" — {recommendation['purpose']}"
+        y = _labeled(pdf, "SFX recommendation", detail, 42, y - 4, 528)
+    selected_sfx = beat.get("selected_sfx")
+    if selected_sfx:
+        license_record = selected_sfx["license"]
+        detail = (
+            f"{selected_sfx.get('title') or ('Asset ' + str(selected_sfx['asset_id']))}"
+            f" | {selected_sfx.get('sfx_kind') or 'unclassified'}"
+            f" | License: {license_record['name'] or 'UNKNOWN'}"
+        )
+        y = _labeled(pdf, "Selected SFX", detail, 42, y - 4, 528)
 
     if selected:
         paths: list[Path]

@@ -83,3 +83,27 @@ def test_search_queries_and_production_opportunities_require_real_content() -> N
     }
     with pytest.raises(ValidationError, match="requires an SFX or edit suggestion"):
         VisualPlan.model_validate(document)
+
+
+def test_structured_sfx_recommendation_is_optional_and_backward_compatible() -> None:
+    document = _plan()
+    document["beats"][0]["production_opportunities"] = [{
+        "trigger": "the chest shifts away from the wall",
+        "sfx_recommendation": {
+            "type": "sfx",
+            "purpose": "Attention reset for an unexpected reveal",
+            "sfx_kind": "one_shot",
+            "desired_sound": "restrained low tonal accent",
+            "search_queries": ["subtle dark tonal hit", "restrained impact"],
+            "intensity": "subtle",
+            "note": "Do not literalize the narration.",
+        },
+    }]
+    plan = VisualPlan.model_validate(document)
+    recommendation = plan.beats[0].production_opportunities[0].sfx_recommendation
+    assert recommendation is not None
+    assert recommendation.sfx_kind == "one_shot"
+    assert recommendation.search_queries == (
+        "subtle dark tonal hit", "restrained impact"
+    )
+    assert VisualPlan.model_validate(_plan()).beats[0].production_opportunities[0].sfx_suggestion

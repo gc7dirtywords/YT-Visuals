@@ -95,6 +95,67 @@ def test_video_scan_uses_ffprobe_metadata(catalog_settings: Settings) -> None:
     engine.dispose()
 
 
+def test_audio_scan_uses_shared_catalog_and_ffprobe_metadata(
+    catalog_settings: Settings,
+) -> None:
+    audio_path = catalog_settings.root / "Library/SFX/Impacts/subtle-hit.wav"
+    audio_path.parent.mkdir(parents=True)
+    audio_path.write_bytes(b"synthetic wav bytes")
+    engine = initialize_database(catalog_settings)
+
+    def inspector(candidate):
+        return inspect_media_file(
+            candidate,
+            video_probe=lambda path: ProbeResult(
+                duration_ms=1_250,
+                audio_codec="pcm_s16le",
+                sample_rate=48_000,
+                channels=2,
+                container="wav",
+                raw_metadata={"streams": [{"codec_type": "audio"}]},
+            ),
+        )
+
+    first = LibraryScanner(catalog_settings, engine, inspector=inspector).scan()
+    assert (first.new_assets, first.error_count) == (1, 0)
+    with Session(engine) as session:
+        asset = session.scalar(select(MediaAsset))
+        assert asset is not None
+        assert asset.media_type == "audio"
+        assert asset.relative_path == "Library/SFX/Impacts/subtle-hit.wav"
+        assert (asset.width, asset.height, asset.duration_ms) == (None, None, 1_250)
+        inspection = asset.technical_metadata["local_file"]["inspection"]
+        assert (inspection["codec"], inspection["sample_rate"], inspection["channels"]) == (
+            "pcm_s16le", 48_000, 2
+        )
+
+    second = LibraryScanner(
+        catalog_settings,
+        engine,
+        inspector=lambda candidate: pytest.fail("unchanged SFX was rehashed"),
+    ).scan()
+    assert second.unchanged_files == 1
+    engine.dispose()
+
+
+def test_invalid_audio_isolated_without_catalog_record(catalog_settings: Settings) -> None:
+    path = catalog_settings.root / "Library/SFX/broken.mp3"
+    path.write_bytes(b"not audio")
+    engine = initialize_database(catalog_settings)
+
+    def inspector(candidate):
+        return inspect_media_file(
+            candidate,
+            video_probe=lambda path: ProbeResult(warning="invalid audio stream"),
+        )
+
+    summary = LibraryScanner(catalog_settings, engine, inspector=inspector).scan()
+    assert summary.error_count == 1
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 0
+    engine.dispose()
+
+
 def test_duplicate_copy_move_missing_and_restore(catalog_settings: Settings) -> None:
     first_path = catalog_settings.root / "Library/Images/first.png"
     copy_path = catalog_settings.root / "Library/Images/copy.png"

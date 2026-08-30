@@ -30,6 +30,7 @@ class LibrarySearchResult:
     relative_path: str
     locations: tuple[str, ...]
     media_type: str
+    sfx_kind: str | None
     mime_type: str | None
     width: int | None
     height: int | None
@@ -54,6 +55,7 @@ class LibraryStatus:
     missing_assets: int
     images: int
     videos: int
+    audio: int
     available_locations: int
     missing_locations: int
     duplicate_locations: int
@@ -86,6 +88,9 @@ def get_library_status(engine: Engine) -> LibraryStatus:
             ) or 0,
             videos=session.scalar(
                 select(func.count()).select_from(MediaAsset).where(MediaAsset.media_type == "video")
+            ) or 0,
+            audio=session.scalar(
+                select(func.count()).select_from(MediaAsset).where(MediaAsset.media_type == "audio")
             ) or 0,
             available_locations=sum(count for _, count in locations_by_asset),
             missing_locations=session.scalar(
@@ -191,6 +196,7 @@ def _to_result(asset: MediaAsset) -> LibrarySearchResult:
         relative_path=asset.relative_path,
         locations=tuple(sorted(item.relative_path for item in asset.locations)),
         media_type=asset.media_type,
+        sfx_kind=asset.sfx_kind,
         mime_type=asset.mime_type,
         width=asset.width,
         height=asset.height,

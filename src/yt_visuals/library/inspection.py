@@ -15,6 +15,7 @@ from ..acquisition import ProbeResult, probe_media_file
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm"}
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac"}
 MIME_OVERRIDES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -25,6 +26,9 @@ MIME_OVERRIDES = {
     ".m4v": "video/x-m4v",
     ".mkv": "video/x-matroska",
     ".webm": "video/webm",
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
 }
 
 
@@ -48,8 +52,8 @@ class InspectedMedia:
     candidate: Candidate
     sha256: str
     mime_type: str
-    width: int
-    height: int
+    width: int | None
+    height: int | None
     duration_ms: int | None
     technical_metadata: dict[str, Any]
 
@@ -68,6 +72,7 @@ def discover_library_files(root: Path) -> tuple[list[Candidate], list[DiscoveryE
     library_roots = (
         (root / "Library" / "Images", "image", IMAGE_EXTENSIONS),
         (root / "Library" / "Videos", "video", VIDEO_EXTENSIONS),
+        (root / "Library" / "SFX", "audio", AUDIO_EXTENSIONS),
     )
 
     for scan_root, media_type, extensions in library_roots:
@@ -139,7 +144,7 @@ def inspect_media_file(
                 "inspection": {"tool": "Pillow", "format": image_format, "mode": mode}
             }
             duration_ms = None
-        else:
+        elif candidate.media_type == "video":
             probe = video_probe(candidate.absolute_path)
             if probe.warning:
                 raise MediaInspectionError(probe.warning)
@@ -149,6 +154,31 @@ def inspect_media_file(
             duration_ms = probe.duration_ms
             mime_type = _mime_for(candidate.extension)
             metadata = {"inspection": {"tool": "ffprobe", "ffprobe": probe.raw_metadata}}
+        else:
+            probe = video_probe(candidate.absolute_path)
+            if probe.warning:
+                raise MediaInspectionError(probe.warning)
+            if (
+                not probe.audio_codec
+                or probe.duration_ms is None
+                or probe.duration_ms <= 0
+                or probe.sample_rate is None
+                or probe.channels is None
+            ):
+                raise MediaInspectionError("ffprobe found no usable audio stream")
+            width = height = None
+            duration_ms = probe.duration_ms
+            mime_type = _mime_for(candidate.extension)
+            metadata = {
+                "inspection": {
+                    "tool": "ffprobe",
+                    "codec": probe.audio_codec,
+                    "container": probe.container,
+                    "sample_rate": probe.sample_rate,
+                    "channels": probe.channels,
+                    "ffprobe": probe.raw_metadata,
+                }
+            }
     except MediaInspectionError:
         raise
     except (OSError, UnidentifiedImageError, ValueError) as exc:

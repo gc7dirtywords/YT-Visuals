@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block title %}YT-Visuals Producer{% endblock %}</title>
+    <title>{% block title %}YT-ChannelOps{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='producer.css') }}">
     <script src="{{ url_for('static', filename='producer.js') }}" defer></script>
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="{{ url_for('index') }}">YT‑Visuals <span>Producer</span></a>
+      <a class="brand" href="{{ url_for('index') }}">YT‑ChannelOps</a>
       <nav class="topnav">
         <a href="{{ url_for('integrations') }}">Settings</a>
         <a class="pexels-link" href="https://www.pexels.com" target="_blank" rel="noreferrer">Photos and videos provided by Pexels</a>

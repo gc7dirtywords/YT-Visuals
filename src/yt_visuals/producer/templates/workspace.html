@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ workspace.title }} · YT-Visuals{% endblock %}
+{% block title %}{{ workspace.title }} · YT-ChannelOps{% endblock %}
 {% block content %}
   <nav class="breadcrumbs"><a href="{{ url_for('index') }}">← Workspaces</a>{% if workspace.release %}<span>/</span><a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>{% endif %}</nav>
   <section class="workspace-header">
@@ -30,7 +30,7 @@
         <div class="actions-menu">
           <details class="rename-story"><summary>Rename Story</summary><form action="{{ url_for('rename_workspace_title', workspace_id=workspace.workspace_id) }}" method="post"><label>Story display title <input name="title" value="{{ workspace.title }}" required></label><button type="submit">Save title</button></form></details>
           <details class="organization-controls"><summary>Workspace Organization</summary>
-            <form action="{{ url_for('update_workspace_status', workspace_id=workspace.workspace_id) }}" method="post"><label>Status <select name="status">{% for value, label in [('planned','Planned'),('in_production','In Production'),('completed','Completed')] %}<option value="{{ value }}" {% if workspace.status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button type="submit">Update status</button></form>
+            {% if workspace.release %}<p class="organization-note">Status is controlled by the assigned release.</p>{% else %}<form action="{{ url_for('update_workspace_status', workspace_id=workspace.workspace_id) }}" method="post"><label>Status <select name="status">{% for value, label in [('planned','Planned'),('in_production','In Production'),('completed','Completed')] %}<option value="{{ value }}" {% if workspace.status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button type="submit">Update status</button></form>{% endif %}
             <form action="{{ url_for('assign_workspace_release', workspace_id=workspace.workspace_id) }}" method="post"><label>Video Release <select name="release_id"><option value="">Unassigned</option>{% for release in releases %}<option value="{{ release.id }}" {% if workspace.release and workspace.release.id == release.id %}selected{% endif %}>{{ release.name }}</option>{% endfor %}</select></label><button type="submit">Update release</button></form>
             {% if workspace.release %}<form action="{{ url_for('move_workspace_release', workspace_id=workspace.workspace_id, direction='up') }}" method="post"><button type="submit">Move story up</button></form><form action="{{ url_for('move_workspace_release', workspace_id=workspace.workspace_id, direction='down') }}" method="post"><button type="submit">Move story down</button></form>{% endif %}
           </details>
@@ -48,6 +48,8 @@
       </details>
     </div>
   </section>
+
+  {% if workspace.history %}<details class="compact-history workspace-history"><summary>Workspace history ({{ workspace.history|length }})</summary><ol>{% for event in workspace.history %}<li><strong>{{ event.label }}</strong><span>{{ event.occurred_at }} · {{ event.source }}</span>{% if event.before is not none %}<span>Before: {{ event.before }}</span>{% endif %}{% if event.after is not none %}<span>After: {{ event.after }}</span>{% endif %}</li>{% endfor %}</ol></details>{% endif %}
 
   <div class="workspace-layout">
     <nav class="beat-navigator" aria-label="Beat navigator">
@@ -82,10 +84,48 @@
           <section class="opportunities">
             <h3>Optional action-specific production opportunities</h3>
             {% for item in spec.production_opportunities %}
-              <p><strong>{{ item.trigger }}</strong>{% if item.sfx_suggestion %} · SFX: {{ item.sfx_suggestion }}{% endif %}{% if item.edit_suggestion %} · Edit: {{ item.edit_suggestion }}{% endif %}</p>
+              <p><strong>{{ item.trigger }}</strong>{% if item.sfx_recommendation %} · SFX: {{ item.sfx_recommendation.desired_sound }}{% elif item.sfx_suggestion %} · SFX: {{ item.sfx_suggestion }}{% endif %}{% if item.edit_suggestion %} · Edit: {{ item.edit_suggestion }}{% endif %}</p>
             {% endfor %}
           </section>
         {% endif %}
+
+        <details class="sfx-section" {% if focused_beat == beat.beat_id and open_panel == 'sfx' %}open{% endif %}>
+          <summary>SFX{% if beat.selected_sfx %} · Selected{% elif beat.sfx_recommendations %} · Project recommendation{% endif %}</summary>
+          <div class="sfx-body">
+            {% for recommendation in beat.sfx_recommendations %}
+              <div class="sfx-recommendation">
+                <p><strong>Recommendation:</strong> {{ recommendation.desired_sound }}</p>
+                <p><strong>Trigger:</strong> {{ recommendation.trigger }}</p>
+                {% if recommendation.purpose %}<p><strong>Purpose:</strong> {{ recommendation.purpose }}</p>{% endif %}
+                {% if recommendation.sfx_kind %}<p><strong>Kind:</strong> {{ recommendation.sfx_kind|replace('_',' ')|title }} · <strong>Intensity:</strong> {{ recommendation.intensity }}</p>{% endif %}
+                {% if recommendation.note %}<p>{{ recommendation.note }}</p>{% endif %}
+                {% if recommendation.search_queries %}<div class="queries">{% for query in recommendation.search_queries %}<button type="button" class="query" data-copy="{{ query }}">{{ query }} <span>Copy</span></button>{% endfor %}</div>{% endif %}
+              </div>
+            {% endfor %}
+            {% if not beat.sfx_recommendations %}<p class="empty-state">No Project SFX recommendation. Manual selection remains available.</p>{% endif %}
+
+            {% if beat.selected_sfx %}
+              <div class="selected-sfx">
+                <audio src="{{ url_for('media', asset_id=beat.selected_sfx.asset_id) }}" controls preload="metadata"></audio>
+                <strong>{{ beat.selected_sfx.title or ('Asset ' ~ beat.selected_sfx.asset_id) }}</strong>
+                <span>{{ beat.selected_sfx.sfx_kind|replace('_',' ')|title if beat.selected_sfx.sfx_kind else 'Unclassified' }} · {{ beat.selected_sfx.duration_ms or 0 }} ms</span>
+                <span>{{ beat.selected_sfx.source.provider or beat.selected_sfx.source.origin }} · License {{ beat.selected_sfx.license.name or 'UNKNOWN' }}</span>
+                <form action="{{ url_for('clear_sfx', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><button type="submit">Remove Selected SFX</button></form>
+              </div>
+            {% endif %}
+
+            <div class="existing-media-search"><h3>Search SFX Library</h3><form action="{{ url_for('search_sfx_media', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><input type="search" name="sfx_query" value="{{ request.args.get('sfx_query', '') if request.args.get('sfx_beat') == beat.id else '' }}" placeholder="Search cataloged SFX"><button type="submit">Search</button></form></div>
+            {% set sfx_results = beat.sfx_search if beat.sfx_search else beat.sfx_candidates %}
+            {% if sfx_results %}<div class="sfx-results">{% for candidate in sfx_results %}<div class="candidate sfx-candidate"><audio src="{{ url_for('media', asset_id=candidate.asset_id) }}" controls preload="metadata"></audio><div class="candidate-body"><strong>{{ candidate.title or ('Asset ' ~ candidate.asset_id) }}</strong><span>{{ candidate.sfx_kind|replace('_',' ')|title if candidate.sfx_kind else 'Unclassified' }} · License {{ candidate.license.name or 'UNKNOWN' }}</span><form action="{{ url_for('select_sfx', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button class="primary" type="submit">Use This SFX</button></form></div></div>{% endfor %}</div>{% endif %}
+            {% for group, label in [('release', 'Used in This Release'), ('story', 'Used in This Story'), ('recent', 'Recently Selected')] %}{% if beat.sfx_reuse[group] %}<section class="reuse-media"><h3>{{ label }}</h3><div class="sfx-results">{% for candidate in beat.sfx_reuse[group] %}<div class="candidate sfx-candidate"><audio src="{{ url_for('media', asset_id=candidate.asset_id) }}" controls preload="metadata"></audio><div class="candidate-body"><strong>{{ candidate.title or ('Asset ' ~ candidate.asset_id) }}</strong><span>Used in: {% for use in candidate.used_in %}{{ use.story_title }} · {{ use.beat_id }}{% if not loop.last %}; {% endif %}{% endfor %}</span><form action="{{ url_for('select_sfx', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=candidate.asset_id) }}" method="post"><button class="primary" type="submit">Use This SFX</button></form></div></div>{% endfor %}</div></section>{% endif %}{% endfor %}
+
+            <details><summary>Upload / External SFX</summary>
+              <form action="{{ url_for('upload_sfx', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post" enctype="multipart/form-data"><label>SFX file <input type="file" name="sfx_file" accept="audio/wav,audio/mpeg,audio/flac,.wav,.mp3,.flac" required></label><label>Kind <select name="sfx_kind"><option value="one_shot">One-shot</option><option value="ambient">Ambient</option></select></label><button type="submit">Upload &amp; Use SFX</button></form>
+              <form action="{{ url_for('import_external_sfx', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><label>Direct WAV/MP3/FLAC URL <input type="url" name="direct_media_url" required></label><label>Source/provider name <input type="text" name="source_name" placeholder="Example: sound archive"></label><label>Source page URL <input type="url" name="source_page_url"></label><label>Creator / uploader <input type="text" name="creator_attribution"></label><label>License name <input type="text" name="license_name"></label><label>License URL <input type="url" name="license_url"></label><label>Kind <select name="sfx_kind"><option value="one_shot">One-shot</option><option value="ambient">Ambient</option></select></label><button type="submit">Import &amp; Use SFX</button></form>
+              <small>Files are validated with ffprobe, SHA-256 deduplicated, and cataloged. License terms are recorded as supplied and never inferred.</small>
+            </details>
+          </div>
+        </details>
 
         <section class="queries">
           <h3>Recommended searches</h3>

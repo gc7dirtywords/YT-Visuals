@@ -41,7 +41,9 @@ def create_app(
     app = Flask(__name__)
     app.secret_key = secrets.token_hex(32)
     app.config["MAX_CONTENT_LENGTH"] = max(
-        settings.max_image_download_bytes, settings.max_video_download_bytes
+        settings.max_image_download_bytes,
+        settings.max_video_download_bytes,
+        settings.max_audio_download_bytes,
     )
     app.extensions["yt_visuals_engine"] = engine
     app.extensions["yt_visuals_engine_owned"] = owned_engine
@@ -65,7 +67,11 @@ def create_app(
 
     @app.get("/releases/<release_id>")
     def release_detail(release_id: str) -> str:
-        return render_template("release.html", release=service.get_release(release_id))
+        return render_template(
+            "release.html",
+            release=service.get_release(release_id),
+            thumbnail_candidates=service.list_thumbnail_candidates(),
+        )
 
     @app.post("/releases")
     def create_release():
@@ -92,6 +98,80 @@ def create_app(
     def delete_release(release_id: str):
         service.delete_release(release_id); flash("Empty video release deleted.", "success")
         return redirect(url_for("index"))
+
+    @app.post("/releases/<release_id>/presentation")
+    def revise_release_presentation(release_id: str):
+        raw_thumbnail = request.form.get("thumbnail_asset_id", "").strip()
+        try:
+            thumbnail_asset_id = int(raw_thumbnail) if raw_thumbnail else None
+        except ValueError as exc:
+            raise ProducerWorkflowError("thumbnail asset ID must be a number") from exc
+        service.create_release_presentation(
+            release_id,
+            public_title=request.form.get("public_title", ""),
+            description=request.form.get("description"),
+            thumbnail_asset_id=thumbnail_asset_id,
+            change_note=request.form.get("change_note"),
+        )
+        flash("Public presentation revision saved.", "success")
+        return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.post("/releases/<release_id>/presentation/title")
+    def revise_release_title(release_id: str):
+        service.revise_release_presentation(
+            release_id,
+            public_title=request.form.get("public_title", ""),
+            change_note=request.form.get("change_note"),
+        )
+        flash("Public title revision saved.", "success")
+        return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.post("/releases/<release_id>/presentation/description")
+    def revise_release_description(release_id: str):
+        service.revise_release_presentation(
+            release_id,
+            description=request.form.get("description", ""),
+            change_note=request.form.get("change_note"),
+        )
+        flash("Description revision saved.", "success")
+        return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.post("/releases/<release_id>/presentation/thumbnail")
+    def revise_release_thumbnail(release_id: str):
+        raw_thumbnail = request.form.get("thumbnail_asset_id", "").strip()
+        try:
+            thumbnail_asset_id = int(raw_thumbnail) if raw_thumbnail else None
+        except ValueError as exc:
+            raise ProducerWorkflowError("thumbnail asset ID must be a number") from exc
+        service.revise_release_presentation(
+            release_id,
+            thumbnail_asset_id=thumbnail_asset_id,
+            change_note=request.form.get("change_note"),
+        )
+        flash("Thumbnail revision saved.", "success")
+        return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.post("/releases/<release_id>/presentation/thumbnail/upload")
+    def upload_release_thumbnail(release_id: str):
+        upload = request.files.get("thumbnail_file")
+        if upload is None or not upload.filename:
+            raise ProducerWorkflowError("choose an image file to upload as the thumbnail")
+        upload_dir = settings.root / "Temp" / "producer-uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(upload.filename).suffix.lower()
+        temporary_path = upload_dir / f"{uuid.uuid4()}{suffix}"
+        try:
+            upload.save(temporary_path)
+            outcome = service.import_release_thumbnail_upload(
+                release_id, temporary_path, Path(upload.filename).name
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        flash(
+            f"Thumbnail uploaded, cataloged, and selected (asset {outcome['asset_id']}).",
+            "success",
+        )
+        return redirect(url_for("release_detail", release_id=release_id))
 
     @app.get("/settings/integrations")
     def integrations() -> str:
@@ -142,14 +222,23 @@ def create_app(
 
     @app.post("/plans")
     def import_plan():
+        pasted = request.form.get("visual_plan_json", "").strip()
         upload = request.files.get("visual_plan")
-        if upload is None or not upload.filename:
-            flash("Choose a Visual Plan JSON file.", "error")
+        if pasted:
+            document = pasted
+        elif upload is not None and upload.filename:
+            try:
+                document = upload.read().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                flash(f"Visual Plan validation failed: {_concise(exc)}", "error")
+                return redirect(url_for("index", import_plan="1"))
+        else:
+            flash("Choose a Visual Plan JSON file or paste Visual Plan JSON.", "error")
             return redirect(url_for("index", import_plan="1"))
         try:
-            plan = VisualPlan.model_validate_json(upload.read().decode("utf-8"))
+            plan = VisualPlan.model_validate_json(document)
             result = service.import_plan(plan)
-        except (UnicodeDecodeError, ValidationError, json.JSONDecodeError) as exc:
+        except (ValidationError, json.JSONDecodeError) as exc:
             flash(f"Visual Plan validation failed: {_concise(exc)}", "error")
             return redirect(url_for("index", import_plan="1"))
         flash("Visual Plan opened." if result["idempotent"] else "Visual Plan imported.", "success")
@@ -163,9 +252,12 @@ def create_app(
                 workspace_id,
                 local_query=request.args.get("local_query", ""),
                 local_beat_id=request.args.get("local_beat"),
+                sfx_query=request.args.get("sfx_query", ""),
+                sfx_beat_id=request.args.get("sfx_beat"),
             ),
             focused_beat=request.args.get("focus"),
-            open_panel=request.args.get("panel"), releases=service.list_releases(),
+            open_panel=request.args.get("panel"),
+            releases=service.list_releases(show_released=False),
         )
 
     @app.post("/stories/<workspace_id>/beats/<beat_id>/select/<int:asset_id>")
@@ -184,6 +276,18 @@ def create_app(
         service.clear_selection(workspace_id, beat_id)
         flash("Beat selection cleared.", "success")
         return _beat_redirect(service, workspace_id, beat_id)
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/sfx/select/<int:asset_id>")
+    def select_sfx(workspace_id: str, beat_id: str, asset_id: int):
+        service.select_sfx(workspace_id, beat_id, asset_id)
+        flash("SFX selected for this beat.", "success")
+        return _beat_redirect(service, workspace_id, beat_id, panel="sfx")
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/sfx/clear")
+    def clear_sfx(workspace_id: str, beat_id: str):
+        service.clear_sfx_selection(workspace_id, beat_id)
+        flash("SFX selection removed.", "success")
+        return _beat_redirect(service, workspace_id, beat_id, panel="sfx")
 
     @app.post("/stories/<workspace_id>/organization/status")
     def update_workspace_status(workspace_id: str):
@@ -231,6 +335,19 @@ def create_app(
                 source="local",
             )
         )
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/sfx/search")
+    def search_sfx_media(workspace_id: str, beat_id: str):
+        query = request.form.get("sfx_query", "").strip()
+        if not query:
+            flash("Enter an SFX catalog search term.", "error")
+            return _beat_redirect(service, workspace_id, beat_id, panel="sfx")
+        if not service.search_sfx_media(query):
+            flash("No existing SFX matched that search.", "error")
+        return redirect(_beat_location(
+            service, workspace_id, beat_id, panel="sfx",
+            sfx_query=query, sfx_beat=beat_id, source="sfx",
+        ))
 
     @app.post("/stories/<workspace_id>/organization/order/<direction>")
     def move_workspace_release(workspace_id: str, direction: str):
@@ -303,6 +420,40 @@ def create_app(
             temporary_path.unlink(missing_ok=True)
         flash("Uploaded media validated, cataloged, and selected.", "success")
         return _beat_redirect(service, workspace_id, beat_id, panel="local")
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/sfx/upload")
+    def upload_sfx(workspace_id: str, beat_id: str):
+        upload = request.files.get("sfx_file")
+        if upload is None or not upload.filename:
+            raise ProducerWorkflowError("choose a WAV, MP3, or FLAC file to upload")
+        upload_dir = settings.root / "Temp" / "producer-uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(upload.filename).suffix.lower()
+        temporary_path = upload_dir / f"{uuid.uuid4()}{suffix}"
+        try:
+            upload.save(temporary_path)
+            service.import_upload(
+                workspace_id, beat_id, temporary_path, Path(upload.filename).name,
+                media_role="sfx", sfx_kind=request.form.get("sfx_kind"),
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        flash("SFX validated, cataloged, and selected.", "success")
+        return _beat_redirect(service, workspace_id, beat_id, panel="sfx")
+
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/sfx/import")
+    def import_external_sfx(workspace_id: str, beat_id: str):
+        service.import_external_media(
+            workspace_id, beat_id, request.form.get("direct_media_url", ""),
+            source_page_url=request.form.get("source_page_url"),
+            creator_attribution=request.form.get("creator_attribution"),
+            license_name=request.form.get("license_name"),
+            license_url=request.form.get("license_url"),
+            media_role="sfx", sfx_kind=request.form.get("sfx_kind"),
+            source_name=request.form.get("source_name"),
+        )
+        flash("External SFX validated, cataloged, and selected.", "success")
+        return _beat_redirect(service, workspace_id, beat_id, panel="sfx")
 
     @app.post("/stories/<workspace_id>/edit/rebuild")
     def rebuild_edit(workspace_id: str):
@@ -410,6 +561,11 @@ def _error_target(service: ProducerWorkflowService) -> str:
                 "hide_asset": "local",
                 "restore_asset": "local",
                 "search_existing_media": "local",
+                "select_sfx": "sfx",
+                "clear_sfx": "sfx",
+                "search_sfx_media": "sfx",
+                "upload_sfx": "sfx",
+                "import_external_sfx": "sfx",
             }
             return _beat_location(
                 service,
@@ -439,7 +595,7 @@ def run_web_app(
     actual_port = int(getattr(server, "server_port", port))
     display_host = "127.0.0.1" if _is_wildcard(host) else host
     local_url = f"http://{display_host}:{actual_port}"
-    output("YT-Visuals Producer")
+    output("YT-ChannelOps")
     output(f"Serving at {local_url}")
     if not _is_loopback(host):
         output("WARNING: The producer UI may be reachable by other devices on your local network.")

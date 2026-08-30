@@ -9,12 +9,14 @@ from .credentials import resolve_pexels_api_key
 
 DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES = 500 * 1024 * 1024
+DEFAULT_MAX_AUDIO_DOWNLOAD_BYTES = 100 * 1024 * 1024
 
 
 EXPECTED_DIRECTORIES = (
     Path("Library"),
     Path("Library/Images"),
     Path("Library/Videos"),
+    Path("Library/SFX"),
     Path("Projects"),
     Path("Temp"),
     Path("Tools"),
@@ -70,6 +72,12 @@ class Settings:
     def max_video_download_bytes(self) -> int:
         return _positive_env_int(
             "YT_VISUALS_MAX_VIDEO_DOWNLOAD_BYTES", DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES
+        )
+
+    @property
+    def max_audio_download_bytes(self) -> int:
+        return _positive_env_int(
+            "YT_VISUALS_MAX_AUDIO_DOWNLOAD_BYTES", DEFAULT_MAX_AUDIO_DOWNLOAD_BYTES
         )
 
 

@@ -16,14 +16,32 @@ class PlanModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class SfxRecommendation(PlanModel):
+    type: Literal["sfx"] = "sfx"
+    purpose: str = Field(min_length=1)
+    sfx_kind: Literal["one_shot", "ambient"]
+    desired_sound: str = Field(min_length=1)
+    search_queries: tuple[str, ...] = Field(min_length=1)
+    intensity: str = Field(min_length=1)
+    note: str | None = None
+
+    @field_validator("search_queries")
+    @classmethod
+    def nonempty_search_queries(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not item for item in value):
+            raise ValueError("SFX search queries cannot be empty")
+        return value
+
+
 class ProductionOpportunity(PlanModel):
     trigger: str = Field(min_length=1)
     sfx_suggestion: str | None = None
+    sfx_recommendation: SfxRecommendation | None = None
     edit_suggestion: str | None = None
 
     @model_validator(mode="after")
     def has_actual_suggestion(self) -> "ProductionOpportunity":
-        if not self.sfx_suggestion and not self.edit_suggestion:
+        if not self.sfx_suggestion and not self.sfx_recommendation and not self.edit_suggestion:
             raise ValueError(
                 "a production opportunity requires an SFX or edit suggestion"
             )

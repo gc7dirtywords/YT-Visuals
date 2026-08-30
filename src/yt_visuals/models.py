@@ -64,7 +64,8 @@ asset_tags = Table(
 class MediaAsset(TimestampMixin, Base):
     __tablename__ = "media_assets"
     __table_args__ = (
-        CheckConstraint("media_type IN ('image', 'video')", name="media_type"),
+        CheckConstraint("media_type IN ('image', 'video', 'audio')", name="media_type"),
+        CheckConstraint("sfx_kind IS NULL OR sfx_kind IN ('one_shot', 'ambient')", name="sfx_kind"),
         CheckConstraint("status IN ('active', 'archived', 'missing')", name="status"),
         CheckConstraint("length(trim(relative_path)) > 0", name="relative_path_not_empty"),
         CheckConstraint("relative_path NOT LIKE '/%'", name="relative_path_not_posix_absolute"),
@@ -86,6 +87,7 @@ class MediaAsset(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     relative_path: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True)
     media_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    sfx_kind: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
     title: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
@@ -205,7 +207,7 @@ class MediaSource(TimestampMixin, Base):
 class MediaDownload(TimestampMixin, Base):
     __tablename__ = "media_downloads"
     __table_args__ = (
-        CheckConstraint("media_type IN ('image', 'video')", name="media_type"),
+        CheckConstraint("media_type IN ('image', 'video', 'audio')", name="media_type"),
         CheckConstraint(
             "status IN ('started', 'success', 'failed', 'duplicate', 'reused')", name="status"
         ),
@@ -720,6 +722,91 @@ class VideoRelease(TimestampMixin, Base):
         back_populates="video_release",
         order_by="ProducerWorkspace.release_position",
     )
+    presentation_revisions: Mapped[list["ReleasePresentationRevision"]] = relationship(
+        back_populates="video_release",
+        order_by="ReleasePresentationRevision.sequence",
+    )
+
+
+class ReleasePresentationRevision(Base):
+    __tablename__ = "release_presentation_revisions"
+    __table_args__ = (
+        CheckConstraint("sequence > 0", name="sequence_positive"),
+        CheckConstraint("length(trim(public_title)) > 0", name="public_title_not_empty"),
+        CheckConstraint("length(trim(source)) > 0", name="source_not_empty"),
+        UniqueConstraint(
+            "video_release_id", "sequence", name="uq_release_presentation_release_sequence"
+        ),
+        Index(
+            "ix_release_presentation_release_created",
+            "video_release_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    video_release_id: Mapped[str] = mapped_column(
+        ForeignKey("video_releases.id", ondelete="RESTRICT"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    public_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    thumbnail_asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT")
+    )
+    source: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="producer_ui", server_default="producer_ui"
+    )
+    change_note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+    video_release: Mapped[VideoRelease] = relationship(back_populates="presentation_revisions")
+    thumbnail_asset: Mapped[MediaAsset | None] = relationship()
+
+
+class ProductionEvent(Base):
+    __tablename__ = "production_events"
+    __table_args__ = (
+        CheckConstraint("subject_type IN ('release', 'workspace')", name="subject_type"),
+        CheckConstraint("length(trim(event_type)) > 0", name="event_type_not_empty"),
+        CheckConstraint("length(trim(source)) > 0", name="source_not_empty"),
+        CheckConstraint("payload_schema_version > 0", name="payload_schema_version_positive"),
+        CheckConstraint(
+            "(related_subject_type IS NULL) = (related_subject_id IS NULL)",
+            name="related_subject_pair",
+        ),
+        CheckConstraint(
+            "related_subject_type IS NULL OR related_subject_type IN ('release', 'workspace')",
+            name="related_subject_type",
+        ),
+        Index("ix_production_events_subject_time", "subject_type", "subject_id", "occurred_at"),
+        Index(
+            "ix_production_events_related_time",
+            "related_subject_type",
+            "related_subject_id",
+            "occurred_at",
+        ),
+        Index("ix_production_events_type_time", "event_type", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    subject_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    related_subject_type: Mapped[str | None] = mapped_column(String(16))
+    related_subject_id: Mapped[str | None] = mapped_column(String(36))
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    source: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="producer_ui", server_default="producer_ui"
+    )
+    payload_schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
 class ProducerBeat(TimestampMixin, Base):
@@ -733,6 +820,7 @@ class ProducerBeat(TimestampMixin, Base):
         UniqueConstraint("workspace_id", "external_beat_id", name="uq_producer_beats_workspace_external"),
         UniqueConstraint("workspace_id", "sequence", name="uq_producer_beats_workspace_sequence"),
         Index("ix_producer_beats_workspace_sequence", "workspace_id", "sequence"),
+        Index("ix_producer_beats_selected_sfx_asset_id", "selected_sfx_asset_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -747,9 +835,21 @@ class ProducerBeat(TimestampMixin, Base):
     )
     selected_asset_sha256: Mapped[str | None] = mapped_column(String(64))
     selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Migration 0009 enforces ON DELETE RESTRICT. SQLite cannot reflect options on
+    # an ALTER TABLE ADD COLUMN reference, so repeating it here creates false drift.
+    selected_sfx_asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("media_assets.id")
+    )
+    selected_sfx_asset_sha256: Mapped[str | None] = mapped_column(String(64))
+    selected_sfx_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     workspace: Mapped[ProducerWorkspace] = relationship(back_populates="beats")
-    selected_asset: Mapped[MediaAsset | None] = relationship()
+    selected_asset: Mapped[MediaAsset | None] = relationship(
+        foreign_keys=[selected_asset_id]
+    )
+    selected_sfx_asset: Mapped[MediaAsset | None] = relationship(
+        foreign_keys=[selected_sfx_asset_id]
+    )
     hidden_assets: Mapped[list["ProducerBeatHiddenAsset"]] = relationship(
         back_populates="beat", cascade="all, delete-orphan"
     )

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Workspaces · YT-Visuals{% endblock %}
+{% block title %}Workspaces · YT-ChannelOps{% endblock %}
 {% block content %}
   <section class="dashboard-heading">
     <div><p class="eyebrow">Producer-led sourcing</p><h1>Workspaces</h1></div>
@@ -9,7 +9,9 @@
   <details class="compact-import" {% if show_import or not (buckets.planned or buckets.in_production or buckets.completed) %}open{% endif %}>
     <summary>+ Import Visual Plan</summary>
     <form action="{{ url_for('import_plan') }}" method="post" enctype="multipart/form-data">
-      <input id="visual-plan" type="file" name="visual_plan" accept="application/json,.json" required>
+      <label>JSON file <input id="visual-plan" type="file" name="visual_plan" accept="application/json,.json"></label>
+      <span class="import-or">or</span>
+      <label>Paste JSON <textarea name="visual_plan_json" rows="5" placeholder="Paste the complete Visual Plan JSON"></textarea></label>
       <button class="primary" type="submit">Import</button>
     </form>
   </details>

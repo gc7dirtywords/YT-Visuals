@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal, Protocol
 
 
-MediaType = Literal["image", "video"]
+MediaType = Literal["image", "video", "audio"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +48,7 @@ class MediaSearchResult:
 
     @property
     def catalog_source_id(self) -> str:
-        kind = "photo" if self.media_type == "image" else "video"
+        kind = {"image": "photo", "video": "video", "audio": "audio"}[self.media_type]
         return f"{kind}:{self.provider_asset_id}"
 
     def to_dict(self) -> dict[str, Any]:

@@ -12,10 +12,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 import yt_visuals.producer.service as producer_service_module
 
-from yt_visuals.acquisition import AcquisitionService
+from yt_visuals.acquisition import AcquisitionService, ProbeResult
 from yt_visuals.config import Settings
 from yt_visuals.database import initialize_database
 from yt_visuals.library import LibraryScanner
+from yt_visuals.library.inspection import inspect_media_file
 from yt_visuals.models import (
     AssetLicense,
     MediaAsset,
@@ -25,6 +26,8 @@ from yt_visuals.models import (
     ProducerBeat,
     ProducerWorkspace,
     ProducerBeatHiddenAsset,
+    ProductionEvent,
+    ReleasePresentationRevision,
 )
 from yt_visuals.producer.contracts import VisualPlan
 from yt_visuals.producer.service import (
@@ -71,6 +74,26 @@ def _plan(*, preference: str = "either") -> VisualPlan:
             ],
         }
     )
+
+
+def _sfx_plan() -> VisualPlan:
+    value = _plan().model_dump(mode="json")
+    value["story"] = {"story_id": "sfx-story", "title": "SFX Story"}
+    value["beats"][0]["production_opportunities"] = [
+        {
+            "trigger": "The chest shifts away from the wall.",
+            "sfx_recommendation": {
+                "type": "sfx",
+                "purpose": "Attention reset for the unexpected reveal",
+                "sfx_kind": "one_shot",
+                "desired_sound": "restrained low tonal accent",
+                "search_queries": ["subtle dark hit"],
+                "intensity": "subtle",
+                "note": "Keep it restrained.",
+            },
+        }
+    ]
+    return VisualPlan.model_validate(value)
 
 
 def _image(path: Path, color: str = "navy", size: tuple[int, int] = (160, 90)) -> bytes:
@@ -163,6 +186,116 @@ def test_local_upload_validates_catalogs_and_sha_deduplicates(
             "same bytes.jpg",
         }
         assert all(item.provider_id is None for item in asset.sources)
+    engine.dispose()
+
+
+def test_sfx_recommendation_selection_reuse_and_edit_handoff(
+    catalog_settings: Settings,
+) -> None:
+    path = catalog_settings.root / "Library/SFX/subtle-dark-hit.wav"
+    path.write_bytes(b"shared synthetic sfx")
+    engine = initialize_database(catalog_settings)
+
+    def inspector(candidate):
+        return inspect_media_file(
+            candidate,
+            video_probe=lambda path: ProbeResult(
+                duration_ms=900, audio_codec="pcm_s16le", sample_rate=48_000,
+                channels=1, container="wav", raw_metadata={"streams": []},
+            ),
+        )
+
+    LibraryScanner(catalog_settings, engine, inspector=inspector).scan()
+    with Session(engine) as session:
+        asset = session.scalar(select(MediaAsset))
+        assert asset is not None
+        asset.sfx_kind = "one_shot"
+        session.commit()
+        asset_id = asset.id
+
+    service = ProducerWorkflowService(catalog_settings, engine)
+    imported = service.import_plan(_sfx_plan())
+    workspace = service.get_workspace(imported["workspace_id"])
+    first, second = workspace["beats"]
+    assert first["sfx_recommendations"][0]["purpose"].startswith("Attention reset")
+    assert [item["asset_id"] for item in first["sfx_candidates"]] == [asset_id]
+    assert second["sfx_recommendations"] == []
+
+    service.select_sfx(workspace["workspace_id"], first["id"], asset_id)
+    service.select_sfx(workspace["workspace_id"], second["id"], asset_id)
+    selected = service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    assert [beat["selected_sfx"]["asset_id"] for beat in selected["beats"]] == [
+        asset_id, asset_id
+    ]
+    assert selected["beats"][1]["sfx_reuse"]["story"][0]["asset_id"] == asset_id
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 1
+
+    result = service.build_edit_folder(workspace["workspace_id"])
+    sfx_entries = [row for row in result["entries"] if row["media_role"] == "sfx"]
+    assert len(sfx_entries) == 2
+    assert len(list((catalog_settings.root / "Projects/sfx-story/Edit/SFX").iterdir())) == 2
+    with (catalog_settings.root / "Projects/sfx-story/Edit/manifest.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as handle:
+        assert [row["media_role"] for row in csv.DictReader(handle)] == ["sfx", "sfx"]
+    assert path.read_bytes() == b"shared synthetic sfx"
+
+    storyboard = service.generate_storyboard(workspace["workspace_id"])
+    assert Path(storyboard["storyboard_path"]).is_file()
+    service.clear_sfx_selection(workspace["workspace_id"], second["id"])
+    assert service.get_workspace(workspace["workspace_id"], include_candidates=False)["beats"][1]["selected_sfx"] is None
+    engine.dispose()
+
+
+def test_external_sfx_import_validates_provenance_license_and_sha_deduplicates(
+    catalog_settings: Settings,
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    workspace = service.get_workspace(imported["workspace_id"], include_candidates=False)
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, headers={"Content-Type": "audio/wav"}, content=b"valid wave fixture")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service.acquisition_factory = lambda settings, supplied: AcquisitionService(
+        settings, supplied, http_client=client,
+        metadata_probe=lambda path: ProbeResult(
+            duration_ms=1_500, audio_codec="pcm_s16le", sample_rate=48_000,
+            channels=2, container="wav", raw_metadata={"streams": [{"codec_type": "audio"}]},
+        ),
+    )
+    first = service.import_external_media(
+        workspace["workspace_id"], workspace["beats"][0]["id"],
+        "https://audio.example.test/subtle-hit.wav",
+        source_page_url="https://audio.example.test/sounds/42",
+        creator_attribution="Archive Artist", license_name="CC BY 4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        media_role="sfx", sfx_kind="one_shot", source_name="Sound Archive",
+    )
+    second = service.import_external_media(
+        workspace["workspace_id"], workspace["beats"][1]["id"],
+        "https://audio.example.test/subtle-hit.wav",
+        source_page_url="https://audio.example.test/sounds/42",
+        creator_attribution="Archive Artist", license_name="CC BY 4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        media_role="sfx", sfx_kind="one_shot", source_name="Sound Archive",
+    )
+    assert first["asset_id"] == second["asset_id"]
+    assert requests == 1
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 1
+        asset = session.get(MediaAsset, first["asset_id"])
+        assert asset is not None and asset.media_type == "audio" and asset.sfx_kind == "one_shot"
+        assert asset.license is not None and asset.license.license_name == "CC BY 4.0"
+        assert asset.sources[0].source_url == "https://audio.example.test/sounds/42"
+        assert asset.sources[0].creator_name == "Archive Artist"
+        assert asset.sources[0].provider is not None
+        assert asset.sources[0].provider.name == "Sound Archive"
+    client.close()
     engine.dispose()
 
 
@@ -621,7 +754,6 @@ def test_workspace_organization_release_order_and_safe_delete(catalog_settings: 
     release = service.create_release("EP0001-Hauntings Behind Horror Movies")
     service.assign_workspace_release(first["workspace_id"], release["id"])
     service.assign_workspace_release(second_import["workspace_id"], release["id"])
-    service.update_workspace_status(second_import["workspace_id"], "planned")
     service.move_workspace_release_position(second_import["workspace_id"], -1)
     detail = service.get_release(release["id"])
     assert [item["title"] for item in detail["workspaces"]] == ["Second Story", "Producer Story"]
@@ -633,9 +765,10 @@ def test_workspace_organization_release_order_and_safe_delete(catalog_settings: 
     project = catalog_settings.root / "Projects" / first["story_id"]
     project.mkdir(parents=True, exist_ok=True)
     (project / "generated.txt").write_text("workspace only", encoding="utf-8")
-    service.delete_workspace(first["workspace_id"])
-    assert not project.exists()
-    assert all(item["workspace_id"] != first["workspace_id"] for item in service.list_workspaces())
+    with pytest.raises(ProducerWorkflowError, match="assignment history"):
+        service.delete_workspace(first["workspace_id"])
+    assert project.exists()
+    assert any(item["workspace_id"] == first["workspace_id"] for item in service.list_workspaces())
     assert service.get_release(release["id"])["name"] == release["name"]
     engine.dispose()
 
@@ -768,6 +901,161 @@ def test_release_metadata_sorting_title_rename_and_cross_story_reuse(
     assert all(not searched["reuse"][group] for group in ("release", "story", "recent"))
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(MediaAsset)) == 1
+    engine.dispose()
+
+
+def test_release_status_controls_story_status_and_released_assignment_is_blocked(
+    catalog_settings: Settings,
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    release = service.create_release("Controlled release")
+    service.assign_workspace_release(imported["workspace_id"], release["id"])
+    assert service.get_workspace(imported["workspace_id"], include_candidates=False)["status"] == "planned"
+
+    with pytest.raises(ProducerWorkflowError, match="controlled"):
+        service.update_workspace_status(imported["workspace_id"], "completed")
+    service.update_release_metadata(
+        release["id"], status="in_production", release_date=None
+    )
+    assert service.get_workspace(imported["workspace_id"], include_candidates=False)["status"] == "in_production"
+    service.update_release_metadata(release["id"], status="scheduled", release_date=None)
+    assert service.get_workspace(imported["workspace_id"], include_candidates=False)["status"] == "completed"
+    assert any(item["id"] == release["id"] for item in service.list_releases(show_released=False))
+    service.update_release_metadata(release["id"], status="released", release_date=None)
+    assert service.get_workspace(imported["workspace_id"], include_candidates=False)["status"] == "completed"
+    assert all(item["id"] != release["id"] for item in service.list_releases(show_released=False))
+
+    other_data = _plan().model_dump(mode="json")
+    other_data["story"] = {"story_id": "unreleased-option-test", "title": "Other"}
+    other_data["beats"][0]["beat_id"] = "other-001"
+    other_data["beats"][1]["beat_id"] = "other-002"
+    other = service.import_plan(VisualPlan.model_validate(other_data))
+    with pytest.raises(ProducerWorkflowError, match="cannot accept"):
+        service.assign_workspace_release(other["workspace_id"], release["id"])
+
+    with Session(engine) as session:
+        status_events = list(
+            session.scalars(
+                select(ProductionEvent).where(
+                    ProductionEvent.subject_id == imported["workspace_id"],
+                    ProductionEvent.event_type == "workspace.status_changed",
+                )
+            )
+        )
+        assert status_events[-1].payload_json == {
+            "before": {"status": "in_production"},
+            "after": {"status": "completed"},
+        }
+        assert status_events[-1].source == "release_status_sync"
+    engine.dispose()
+
+
+def test_release_public_presentation_is_immutable_and_uses_available_image(
+    catalog_settings: Settings,
+) -> None:
+    image_path = catalog_settings.root / "Library/Images/public-thumb.jpg"
+    _image(image_path, "navy")
+    engine = initialize_database(catalog_settings)
+    LibraryScanner(catalog_settings, engine).scan()
+    service = ProducerWorkflowService(catalog_settings, engine)
+    release = service.create_release("Internal release name")
+    assert service.get_release(release["id"])["presentation"] is None
+    candidate = service.list_thumbnail_candidates()[0]
+
+    first = service.create_release_presentation(
+        release["id"],
+        public_title="The First Public Title",
+        description="First description",
+        thumbnail_asset_id=candidate["asset_id"],
+        change_note="Initial producer choice",
+    )
+    second = service.create_release_presentation(
+        release["id"],
+        public_title="The Better Public Title",
+        description="Updated description",
+        thumbnail_asset_id=candidate["asset_id"],
+        change_note="Clarity pass",
+    )
+    detail = service.get_release(release["id"])
+    assert first["sequence"] == 1 and second["sequence"] == 2
+    assert detail["presentation"]["public_title"] == "The Better Public Title"
+    assert [item["public_title"] for item in detail["presentation_history"]] == [
+        "The Better Public Title",
+        "The First Public Title",
+    ]
+    assert detail["presentation"]["public_title"] != detail["name"]
+    with pytest.raises(ProducerWorkflowError, match="not found"):
+        service.create_release_presentation(
+            release["id"],
+            public_title="Invalid thumbnail revision",
+            description=None,
+            thumbnail_asset_id=999999,
+        )
+    with pytest.raises(ProducerWorkflowError, match="presentation history"):
+        service.delete_release(release["id"])
+    with Session(engine) as session:
+        asset = session.get(MediaAsset, candidate["asset_id"])
+        assert asset is not None
+        asset.status = "missing"
+        for location in asset.locations:
+            location.status = "missing"
+        session.commit()
+    with pytest.raises(ProducerWorkflowError, match="available image"):
+        service.create_release_presentation(
+            release["id"],
+            public_title="Unavailable thumbnail revision",
+            description=None,
+            thumbnail_asset_id=candidate["asset_id"],
+        )
+    with Session(engine) as session:
+        revisions = list(
+            session.scalars(
+                select(ReleasePresentationRevision).order_by(
+                    ReleasePresentationRevision.sequence
+                )
+            )
+        )
+        assert [item.public_title for item in revisions] == [
+            "The First Public Title",
+            "The Better Public Title",
+        ]
+        presentation_event = next(
+            event
+            for event in session.scalars(
+                select(ProductionEvent).where(
+                    ProductionEvent.event_type == "release.presentation_revised"
+                )
+            )
+            if event.payload_json["after"]["sequence"] == 2
+        )
+        assert presentation_event is not None
+        assert presentation_event.payload_json["before"]["public_title"] == "The First Public Title"
+        assert presentation_event.payload_json["after"]["public_title"] == "The Better Public Title"
+    engine.dispose()
+
+
+def test_release_and_workspace_history_guard_destructive_deletion(
+    catalog_settings: Settings,
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    disposable = service.create_release("Disposable empty draft")
+    service.delete_release(disposable["id"])
+    with Session(engine) as session:
+        assert session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.subject_id == disposable["id"],
+                ProductionEvent.event_type == "release.deleted",
+            )
+        ) is not None
+
+    historical = service.create_release("Historically assigned")
+    service.assign_workspace_release(imported["workspace_id"], historical["id"])
+    service.assign_workspace_release(imported["workspace_id"], None)
+    with pytest.raises(ProducerWorkflowError, match="assignment history"):
+        service.delete_release(historical["id"])
+    with pytest.raises(ProducerWorkflowError, match="assignment history"):
+        service.delete_workspace(imported["workspace_id"])
+    assert service.get_release(historical["id"])["name"] == "Historically assigned"
     engine.dispose()
 
 
