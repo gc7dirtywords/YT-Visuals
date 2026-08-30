@@ -51,6 +51,32 @@
 
   {% if workspace.history %}<details class="compact-history workspace-history"><summary>Workspace history ({{ workspace.history|length }})</summary><ol>{% for event in workspace.history %}<li><strong>{{ event.label }}</strong><span>{{ event.occurred_at }} · {{ event.source }}</span>{% if event.before is not none %}<span>Before: {{ event.before }}</span>{% endif %}{% if event.after is not none %}<span>After: {{ event.after }}</span>{% endif %}</li>{% endfor %}</ol></details>{% endif %}
 
+  <details class="story-documents">
+    <summary>Story Documents · {{ workspace.documents|selectattr('current')|list|length }} of {{ workspace.documents|length }} types</summary>
+    <p class="organization-note">Durable story history stored under <code>Projects/{{ workspace.story_id }}/Documents/</code>. Uploading a replacement creates a new immutable version.</p>
+    <div class="document-grid">
+      {% for group in workspace.documents %}
+        <section class="document-card">
+          <div class="document-heading"><h3>{{ group.label }}</h3>{% if group.current %}<span>Current · v{{ group.current.version }}</span>{% else %}<span>Not uploaded</span>{% endif %}</div>
+          {% if group.current %}
+            <strong>{{ group.current.original_filename }}</strong>
+            <small>{{ group.current.file_size_bytes }} bytes · SHA-256 {{ group.current.sha256[:12] }}… · {{ group.current.uploaded_at }}</small>
+            <div class="inline-actions"><a class="button-link" href="{{ url_for('view_story_document', workspace_id=workspace.workspace_id, document_id=group.current.id) }}" target="_blank">View</a><a class="button-link" href="{{ url_for('download_story_document', workspace_id=workspace.workspace_id, document_id=group.current.id) }}">Download</a></div>
+          {% else %}<p class="empty-state">No {{ group.label|lower }} stored.</p>{% endif %}
+          <form action="{{ url_for('upload_story_document', workspace_id=workspace.workspace_id) }}" method="post" enctype="multipart/form-data">
+            <input type="hidden" name="document_type" value="{{ group.document_type }}">
+            <label>{{ 'Replace current' if group.current else 'Upload document' }} <input type="file" name="story_document" accept="{{ group.allowed_extensions|join(',') }}" required></label>
+            <small>Allowed: {{ group.allowed_extensions|join(', ') }}</small>
+            <button type="submit">{{ 'Store New Version' if group.current else 'Upload' }}</button>
+          </form>
+          {% if group.versions|length > 1 %}
+            <details class="document-history"><summary>Earlier versions ({{ group.versions|length - 1 }})</summary><ol>{% for version in group.versions[1:] %}<li><span>v{{ version.version }} · {{ version.original_filename }}</span><small>{{ version.uploaded_at }} · {{ version.sha256[:12] }}…</small><span><a href="{{ url_for('view_story_document', workspace_id=workspace.workspace_id, document_id=version.id) }}" target="_blank">View</a> · <a href="{{ url_for('download_story_document', workspace_id=workspace.workspace_id, document_id=version.id) }}">Download</a></span></li>{% endfor %}</ol></details>
+          {% endif %}
+        </section>
+      {% endfor %}
+    </div>
+  </details>
+
   <details class="compact-import edit-plan-import">
     <summary>Edit Plan{% if workspace.edit_plan.imported %} · Imported{% else %} · Not imported{% endif %}</summary>
     <form action="{{ url_for('import_edit_plan', workspace_id=workspace.workspace_id) }}" method="post" enctype="multipart/form-data">

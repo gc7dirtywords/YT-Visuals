@@ -206,6 +206,74 @@ def test_web_edit_plan_import_by_paste_and_file_with_compact_guidance(
     engine.dispose()
 
 
+def test_web_story_document_upload_history_view_and_download(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
+    workspace_id = workspace["workspace_id"]
+    initial = client.get(f"/stories/{workspace_id}")
+    assert b"Story Documents" in initial.data
+    assert b"Narration Script" in initial.data
+    assert b"Narrator Copy" in initial.data
+    assert b"Subtitles" in initial.data
+
+    first_content = b"First subtitle document\n"
+    first = client.post(
+        f"/stories/{workspace_id}/documents",
+        data={
+            "document_type": "subtitles",
+            "story_document": (io.BytesIO(first_content), "subtitles-original.txt"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert first.status_code == 200
+    assert b"Subtitles version 1 stored" in first.data
+    assert b"subtitles-original.txt" in first.data
+
+    second_content = b"Revised subtitle document\n"
+    second = client.post(
+        f"/stories/{workspace_id}/documents",
+        data={
+            "document_type": "subtitles",
+            "story_document": (io.BytesIO(second_content), "subtitles-revised.txt"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert b"Subtitles version 2 stored" in second.data
+    assert "Current · v2".encode("utf-8") in second.data
+    assert b"Earlier versions (1)" in second.data
+
+    documents = service.get_workspace(workspace_id, include_candidates=False)["documents"]
+    subtitles = next(item for item in documents if item["document_type"] == "subtitles")
+    current = subtitles["current"]
+    earlier = subtitles["versions"][1]
+    viewed = client.get(
+        f"/stories/{workspace_id}/documents/{earlier['id']}/view"
+    )
+    assert viewed.status_code == 200 and viewed.data == first_content
+    assert "inline" in viewed.headers["Content-Disposition"]
+    downloaded = client.get(
+        f"/stories/{workspace_id}/documents/{current['id']}/download"
+    )
+    assert downloaded.status_code == 200 and downloaded.data == second_content
+    assert "attachment" in downloaded.headers["Content-Disposition"]
+    assert "subtitles-revised.txt" in downloaded.headers["Content-Disposition"]
+
+    rejected = client.post(
+        f"/stories/{workspace_id}/documents",
+        data={
+            "document_type": "narrator_copy",
+            "story_document": (io.BytesIO(b"not pdf"), "copy.txt"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert b"Narrator Copy accepts only" in rejected.data
+    engine.dispose()
+
+
 def test_integration_settings_never_render_saved_key(catalog_settings: Settings, monkeypatch) -> None:
     monkeypatch.delenv(PEXELS_CREDENTIAL_NAME, raising=False)
     engine = initialize_database(catalog_settings)

@@ -5,11 +5,13 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import zipfile
 
 import httpx
 import pytest
 from PIL import Image
 from sqlalchemy import func, select
+from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm import Session
 import yt_visuals.producer.service as producer_service_module
 
@@ -29,6 +31,7 @@ from yt_visuals.models import (
     ProducerBeatHiddenAsset,
     ProductionEvent,
     ReleasePresentationRevision,
+    StoryDocumentVersion,
 )
 from yt_visuals.producer.contracts import EditPlan, VisualPlan
 from yt_visuals.producer.service import (
@@ -149,6 +152,14 @@ def _colored_jpeg_bytes(color: str) -> bytes:
     stream = io.BytesIO()
     Image.new("RGB", (320, 180), color).save(stream, format="JPEG")
     return stream.getvalue()
+
+
+def _docx(path: Path, text: str = "document") -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", f"<document>{text}</document>")
+    return path.read_bytes()
 
 
 def _setup(catalog_settings: Settings) -> tuple[object, ProducerWorkflowService, dict]:
@@ -1288,4 +1299,111 @@ def test_edit_plan_requires_exact_workspace_identity_and_selected_visuals(
     reversed_beats = _edit_plan().model_copy(update={"beats": tuple(reversed(_edit_plan().beats))})
     with pytest.raises(ProducerWorkflowError, match="exactly match"):
         service.import_edit_plan(imported["workspace_id"], reversed_beats)
+    engine.dispose()
+
+
+def test_story_documents_are_versioned_outside_media_catalog_and_deleted_with_workspace(
+    catalog_settings: Settings,
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    workspace_id = imported["workspace_id"]
+    temp = catalog_settings.root / "Temp"
+    script_pdf = temp / "script-one.pdf"
+    script_pdf.write_bytes(b"%PDF-1.4\nfirst script")
+    first = service.upload_story_document(
+        workspace_id, "narration_script", script_pdf, "Original Script.pdf"
+    )
+    script_docx = temp / "script-two.docx"
+    second_content = _docx(script_docx, "replacement")
+    second = service.upload_story_document(
+        workspace_id, "narration_script", script_docx, "Revised Script.docx"
+    )
+    narrator = temp / "narrator.pdf"
+    narrator.write_bytes(b"%PDF-1.7\nnarrator copy")
+    service.upload_story_document(
+        workspace_id, "narrator_copy", narrator, "Narrator Final.pdf"
+    )
+    subtitles = temp / "subtitles.txt"
+    subtitles.write_text("Opening subtitle\n", encoding="utf-8")
+    service.upload_story_document(
+        workspace_id, "subtitles", subtitles, "subtitles.txt"
+    )
+    notes = temp / "notes.rtf"
+    notes.write_bytes(b"{\\rtf1 Production notes}")
+    service.upload_story_document(workspace_id, "other", notes, "Notes.rtf")
+
+    assert first["version"] == 1 and second["version"] == 2
+    detail = service.get_workspace(workspace_id, include_candidates=False)
+    script_group = next(
+        item for item in detail["documents"] if item["document_type"] == "narration_script"
+    )
+    assert script_group["current"]["id"] == second["id"]
+    assert [item["version"] for item in script_group["versions"]] == [2, 1]
+    assert script_group["versions"][1]["original_filename"] == "Original Script.pdf"
+    documents_root = catalog_settings.root / "Projects/producer-story/Documents"
+    stored = sorted(documents_root.iterdir())
+    assert len(stored) == 5
+    assert any(path.read_bytes() == b"%PDF-1.4\nfirst script" for path in stored)
+    assert any(path.read_bytes() == second_content for path in stored)
+    path, view = service.story_document_path(workspace_id, first["id"])
+    assert path.read_bytes() == b"%PDF-1.4\nfirst script"
+    assert view["original_filename"] == "Original Script.pdf"
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 0
+        assert session.scalar(select(func.count()).select_from(StoryDocumentVersion)) == 5
+        event_types = list(
+            session.scalars(
+                select(ProductionEvent.event_type).where(
+                    ProductionEvent.subject_id == workspace_id,
+                    ProductionEvent.event_type.in_(
+                        ["workspace.document_uploaded", "workspace.document_replaced"]
+                    ),
+                )
+            )
+        )
+        assert event_types.count("workspace.document_uploaded") == 4
+        assert event_types.count("workspace.document_replaced") == 1
+
+    service.delete_workspace(workspace_id)
+    assert not documents_root.parent.exists()
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(StoryDocumentVersion)) == 0
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 0
+    engine.dispose()
+
+
+def test_story_document_validation_and_trusted_paths(
+    catalog_settings: Settings,
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    workspace_id = imported["workspace_id"]
+    temp = catalog_settings.root / "Temp"
+    invalid_pdf = temp / "invalid.pdf"
+    invalid_pdf.write_bytes(b"not a pdf")
+    with pytest.raises(ProducerWorkflowError, match="valid PDF"):
+        service.upload_story_document(
+            workspace_id, "narration_script", invalid_pdf, "invalid.pdf"
+        )
+    text = temp / "copy.txt"
+    text.write_text("copy", encoding="utf-8")
+    with pytest.raises(ProducerWorkflowError, match="accepts only"):
+        service.upload_story_document(workspace_id, "narrator_copy", text, "copy.txt")
+    executable = temp / "notes.exe"
+    executable.write_bytes(b"MZ")
+    with pytest.raises(ProducerWorkflowError, match="accepts only"):
+        service.upload_story_document(workspace_id, "other", executable, "notes.exe")
+
+    uploaded = service.upload_story_document(
+        workspace_id, "subtitles", text, "../../safe-subtitles.txt"
+    )
+    assert uploaded["original_filename"] == "safe-subtitles.txt"
+    with Session(engine) as session:
+        row = session.get(StoryDocumentVersion, uploaded["id"])
+        assert row is not None
+        row.stored_filename = "../../outside.txt"
+        with pytest.raises(DatabaseError, match="immutable"):
+            session.commit()
+        session.rollback()
+    with pytest.raises(ProducerWorkflowError, match="escaped"):
+        service.story_documents_folder("../../outside")
     engine.dispose()

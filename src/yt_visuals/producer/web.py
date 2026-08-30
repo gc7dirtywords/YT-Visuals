@@ -405,6 +405,53 @@ def create_app(
         flash(f"Workspace {deleted} and its project files were deleted. Master Library assets were kept.", "success")
         return redirect(url_for("index"))
 
+    @app.post("/stories/<workspace_id>/documents")
+    def upload_story_document(workspace_id: str):
+        upload = request.files.get("story_document")
+        if upload is None or not upload.filename:
+            raise ProducerWorkflowError("choose a story document to upload")
+        upload_dir = settings.root / "Temp" / "producer-uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(upload.filename.replace("\\", "/")).suffix.casefold()
+        temporary_path = upload_dir / f"{uuid.uuid4()}{suffix}"
+        try:
+            upload.save(temporary_path)
+            result = service.upload_story_document(
+                workspace_id,
+                request.form.get("document_type", ""),
+                temporary_path,
+                upload.filename,
+            )
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        flash(
+            f"{result['label']} version {result['version']} stored.",
+            "success",
+        )
+        return redirect(url_for("workspace", workspace_id=workspace_id))
+
+    @app.get("/stories/<workspace_id>/documents/<document_id>/view")
+    def view_story_document(workspace_id: str, document_id: str):
+        path, document = service.story_document_path(workspace_id, document_id)
+        return send_file(
+            path,
+            mimetype=document["mime_type"].split(";", 1)[0],
+            as_attachment=False,
+            download_name=document["original_filename"],
+            conditional=True,
+        )
+
+    @app.get("/stories/<workspace_id>/documents/<document_id>/download")
+    def download_story_document(workspace_id: str, document_id: str):
+        path, document = service.story_document_path(workspace_id, document_id)
+        return send_file(
+            path,
+            mimetype=document["mime_type"].split(";", 1)[0],
+            as_attachment=True,
+            download_name=document["original_filename"],
+            conditional=True,
+        )
+
     @app.post("/stories/<workspace_id>/beats/<beat_id>/hide/<int:asset_id>")
     def hide_asset(workspace_id: str, beat_id: str, asset_id: int):
         service.hide_asset(workspace_id, beat_id, asset_id)

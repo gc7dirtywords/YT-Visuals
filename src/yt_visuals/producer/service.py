@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ from ..models import (
     ProducerBeatHiddenAsset,
     ProducerWorkspace,
     ReleasePresentationRevision,
+    StoryDocumentVersion,
     VideoRelease,
 )
 from ..providers.base import MediaProvider as ProviderClient
@@ -68,6 +70,29 @@ RELEASE_WORKSPACE_STATUS = {
     "released": "completed",
 }
 _PRESENTATION_UNSET = object()
+DOCUMENT_TYPES = ("narration_script", "narrator_copy", "subtitles", "other")
+DOCUMENT_TYPE_LABELS = {
+    "narration_script": "Narration Script",
+    "narrator_copy": "Narrator Copy",
+    "subtitles": "Subtitles",
+    "other": "Other",
+}
+DOCUMENT_EXTENSIONS = {
+    "narration_script": frozenset({".pdf", ".docx", ".txt"}),
+    "narrator_copy": frozenset({".pdf"}),
+    "subtitles": frozenset({".txt"}),
+    "other": frozenset({".pdf", ".docx", ".txt", ".rtf", ".odt", ".csv", ".md"}),
+}
+DOCUMENT_MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".txt": "text/plain; charset=utf-8",
+    ".rtf": "application/rtf",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".csv": "text/csv; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+}
+MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 
 
 class ProducerWorkflowError(RuntimeError):
@@ -291,7 +316,9 @@ class ProducerWorkflowService:
                 .options(
                     selectinload(ProducerWorkspace.beats).selectinload(
                         ProducerBeat.hidden_assets
-                    ), selectinload(ProducerWorkspace.video_release).selectinload(
+                    ),
+                    selectinload(ProducerWorkspace.document_versions),
+                    selectinload(ProducerWorkspace.video_release).selectinload(
                         VideoRelease.workspaces
                     )
                 )
@@ -326,6 +353,7 @@ class ProducerWorkflowService:
                     "document_sha256": workspace.edit_plan_document_sha256,
                     "imported_at": workspace.edit_plan_imported_at,
                 },
+                "documents": self._document_groups(workspace.document_versions),
                 "selected": sum(1 for row in rows if row["selected_asset_id"]),
                 "selected_sfx": sum(1 for row in rows if row["selected_sfx_asset_id"]),
                 "total": len(rows),
@@ -384,6 +412,191 @@ class ProducerWorkflowService:
                 sfx_reuse_groups, beat["id"], displayed_asset_ids=sfx_displayed
             )
         return result
+
+    @staticmethod
+    def _document_view(document: StoryDocumentVersion) -> dict[str, Any]:
+        return {
+            "id": document.id,
+            "document_type": document.document_type,
+            "label": DOCUMENT_TYPE_LABELS[document.document_type],
+            "version": document.version,
+            "original_filename": document.original_filename,
+            "stored_filename": document.stored_filename,
+            "sha256": document.sha256,
+            "mime_type": document.mime_type,
+            "file_size_bytes": document.file_size_bytes,
+            "uploaded_at": document.uploaded_at,
+        }
+
+    @classmethod
+    def _document_groups(
+        cls, documents: list[StoryDocumentVersion]
+    ) -> list[dict[str, Any]]:
+        groups: list[dict[str, Any]] = []
+        for document_type in DOCUMENT_TYPES:
+            versions = sorted(
+                (
+                    cls._document_view(item)
+                    for item in documents
+                    if item.document_type == document_type
+                ),
+                key=lambda item: item["version"],
+                reverse=True,
+            )
+            groups.append(
+                {
+                    "document_type": document_type,
+                    "label": DOCUMENT_TYPE_LABELS[document_type],
+                    "current": versions[0] if versions else None,
+                    "versions": versions,
+                    "allowed_extensions": sorted(DOCUMENT_EXTENSIONS[document_type]),
+                }
+            )
+        return groups
+
+    @staticmethod
+    def _document_event_state(document: dict[str, Any] | None) -> dict[str, Any] | None:
+        if document is None:
+            return None
+        return {
+            **document,
+            "uploaded_at": (
+                document["uploaded_at"].isoformat()
+                if isinstance(document["uploaded_at"], datetime)
+                else document["uploaded_at"]
+            ),
+        }
+
+    def upload_story_document(
+        self,
+        workspace_id: str,
+        document_type: str,
+        source_path: Path,
+        original_filename: str,
+    ) -> dict[str, Any]:
+        if document_type not in DOCUMENT_TYPES:
+            raise ProducerWorkflowError("unsupported story document type")
+        clean_filename = _clean_document_filename(original_filename)
+        extension = Path(clean_filename).suffix.casefold()
+        if extension not in DOCUMENT_EXTENSIONS[document_type]:
+            allowed = ", ".join(sorted(DOCUMENT_EXTENSIONS[document_type]))
+            raise ProducerWorkflowError(
+                f"{DOCUMENT_TYPE_LABELS[document_type]} accepts only: {allowed}"
+            )
+        try:
+            file_size = source_path.stat().st_size
+        except OSError as exc:
+            raise ProducerWorkflowError("uploaded document could not be read") from exc
+        if file_size <= 0:
+            raise ProducerWorkflowError("uploaded document is empty")
+        if file_size > MAX_DOCUMENT_BYTES:
+            raise ProducerWorkflowError(
+                f"uploaded document exceeds the {MAX_DOCUMENT_BYTES}-byte safety limit"
+            )
+        _validate_document_content(source_path, extension)
+        digest = _file_sha256(source_path)
+        destination: Path | None = None
+        with Session(self.engine) as session:
+            workspace = session.scalar(
+                select(ProducerWorkspace)
+                .where(ProducerWorkspace.id == workspace_id)
+                .options(selectinload(ProducerWorkspace.document_versions))
+            )
+            if workspace is None:
+                raise ProducerWorkflowError("producer workspace was not found")
+            existing = sorted(
+                (
+                    item
+                    for item in workspace.document_versions
+                    if item.document_type == document_type
+                ),
+                key=lambda item: item.version,
+            )
+            previous = self._document_view(existing[-1]) if existing else None
+            version = existing[-1].version + 1 if existing else 1
+            label = _safe_label(Path(clean_filename).stem, fallback="document")[:72]
+            stored_filename = (
+                f"{document_type}-v{version:04d}-{label}-{digest[:12]}{extension}"
+            )
+            documents_root = self.story_documents_folder(workspace.story_external_id)
+            destination = documents_root / stored_filename
+            _assert_within(destination, documents_root)
+            documents_root.mkdir(parents=True, exist_ok=True)
+            try:
+                with source_path.open("rb") as source, destination.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+            except FileExistsError as exc:
+                raise ProducerWorkflowError(
+                    "document version destination already exists; nothing was overwritten"
+                ) from exc
+            except OSError as exc:
+                destination.unlink(missing_ok=True)
+                raise ProducerWorkflowError("uploaded document could not be stored") from exc
+
+            document = StoryDocumentVersion(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace.id,
+                document_type=document_type,
+                version=version,
+                original_filename=clean_filename,
+                stored_filename=stored_filename,
+                sha256=digest,
+                mime_type=DOCUMENT_MIME_TYPES[extension],
+                file_size_bytes=file_size,
+                uploaded_at=datetime.now(timezone.utc),
+            )
+            session.add(document)
+            after = self._document_view(document)
+            self._record_event(
+                session,
+                "workspace",
+                workspace.id,
+                (
+                    "workspace.document_replaced"
+                    if previous is not None
+                    else "workspace.document_uploaded"
+                ),
+                before=self._document_event_state(previous),
+                after=self._document_event_state(after),
+            )
+            try:
+                session.commit()
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+            return after
+
+    def story_documents_folder(self, story_id: str) -> Path:
+        projects_root = self.settings.root / "Projects"
+        path = projects_root / story_id / "Documents"
+        _assert_within(path, projects_root)
+        return path
+
+    def story_document_path(
+        self, workspace_id: str, document_id: str
+    ) -> tuple[Path, dict[str, Any]]:
+        with Session(self.engine) as session:
+            document = session.scalar(
+                select(StoryDocumentVersion)
+                .where(
+                    StoryDocumentVersion.id == document_id,
+                    StoryDocumentVersion.workspace_id == workspace_id,
+                )
+                .options(selectinload(StoryDocumentVersion.workspace))
+            )
+            if document is None:
+                raise ProducerWorkflowError("story document version was not found")
+            if Path(document.stored_filename).name != document.stored_filename:
+                raise ProducerWorkflowError("stored story document path is unsafe")
+            documents_root = self.story_documents_folder(
+                document.workspace.story_external_id
+            )
+            path = documents_root / document.stored_filename
+            _assert_within(path, documents_root)
+            view = self._document_view(document)
+        if not path.is_file():
+            raise ProducerWorkflowError("stored story document file is missing")
+        return path, view
 
     @staticmethod
     def _edit_guidance_view(beat: ProducerBeat) -> dict[str, Any] | None:
@@ -2231,6 +2444,64 @@ def _wikimedia_metadata_text(metadata: dict[str, Any], *keys: str) -> str | None
 def _safe_label(value: str, *, fallback: str) -> str:
     label = SAFE_NAME.sub("-", value.casefold()).strip("-.")
     return label or SAFE_NAME.sub("-", fallback.casefold()).strip("-.") or "asset"
+
+
+def _clean_document_filename(value: str) -> str:
+    filename = value.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    if (
+        not filename
+        or filename in {".", ".."}
+        or len(filename) > 255
+        or any(ord(character) < 32 or ord(character) == 127 for character in filename)
+    ):
+        raise ProducerWorkflowError("uploaded document filename is invalid")
+    return filename
+
+
+def _validate_document_content(path: Path, extension: str) -> None:
+    try:
+        if extension == ".pdf":
+            with path.open("rb") as handle:
+                signature = handle.read(5)
+            if signature != b"%PDF-":
+                raise ProducerWorkflowError("uploaded document is not a valid PDF")
+            return
+        if extension in {".docx", ".odt"}:
+            with zipfile.ZipFile(path) as archive:
+                names = set(archive.namelist())
+                required = (
+                    {"[Content_Types].xml", "word/document.xml"}
+                    if extension == ".docx"
+                    else {"mimetype", "content.xml"}
+                )
+                if not required <= names:
+                    raise ProducerWorkflowError(
+                        f"uploaded document is not a valid {extension[1:].upper()} file"
+                    )
+            return
+        content = path.read_bytes()
+        if extension == ".rtf":
+            if not content.lstrip().lower().startswith(b"{\\rtf"):
+                raise ProducerWorkflowError("uploaded document is not a valid RTF file")
+            return
+        if b"\x00" in content:
+            raise ProducerWorkflowError("uploaded text document contains binary data")
+        content.decode("utf-8-sig")
+    except ProducerWorkflowError:
+        raise
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+        raise ProducerWorkflowError("uploaded document content does not match its file type") from exc
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise ProducerWorkflowError("uploaded document could not be read") from exc
+    return digest.hexdigest()
 
 
 def _assert_within(path: Path, parent: Path) -> None:

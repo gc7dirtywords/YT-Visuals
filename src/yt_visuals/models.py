@@ -708,7 +708,57 @@ class ProducerWorkspace(TimestampMixin, Base):
     beats: Mapped[list["ProducerBeat"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan", order_by="ProducerBeat.sequence"
     )
+    document_versions: Mapped[list["StoryDocumentVersion"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        order_by="StoryDocumentVersion.version",
+    )
     video_release: Mapped["VideoRelease | None"] = relationship(back_populates="workspaces")
+
+
+class StoryDocumentVersion(Base):
+    __tablename__ = "story_document_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "document_type IN ('narration_script', 'narrator_copy', 'subtitles', 'other')",
+            name="document_type",
+        ),
+        CheckConstraint("version > 0", name="version_positive"),
+        CheckConstraint("length(trim(original_filename)) > 0", name="original_filename_not_empty"),
+        CheckConstraint("length(trim(stored_filename)) > 0", name="stored_filename_not_empty"),
+        CheckConstraint("length(sha256) = 64", name="sha256_length"),
+        CheckConstraint("sha256 NOT GLOB '*[^0-9a-f]*'", name="sha256_lower_hex"),
+        CheckConstraint("file_size_bytes >= 0", name="file_size_nonnegative"),
+        UniqueConstraint(
+            "workspace_id", "document_type", "version",
+            name="uq_story_document_workspace_type_version",
+        ),
+        UniqueConstraint(
+            "workspace_id", "stored_filename",
+            name="uq_story_document_workspace_stored_filename",
+        ),
+        Index(
+            "ix_story_document_workspace_type_version",
+            "workspace_id", "document_type", "version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("producer_workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    document_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    stored_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(127), nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+    workspace: Mapped[ProducerWorkspace] = relationship(back_populates="document_versions")
 
 
 class VideoRelease(TimestampMixin, Base):

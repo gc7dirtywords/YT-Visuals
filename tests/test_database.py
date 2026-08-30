@@ -41,6 +41,7 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         "producer_workspaces",
         "production_events",
         "release_presentation_revisions",
+        "story_document_versions",
         "video_releases",
         "stories",
         "tags",
@@ -58,7 +59,7 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         status = get_migration_status(catalog_settings, connection)
         assert status.is_current
-        assert status.current_revision == "0011_edit_plan_guidance"
+        assert status.current_revision == "0012_story_documents"
 
     engine.dispose()
 
@@ -327,5 +328,36 @@ def test_0011_preserves_existing_workspace_and_adds_nullable_edit_guidance(
             )
         ).one()
         assert beat == (None, None, None, None, None, None, 0)
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+    upgraded.dispose()
+
+
+def test_0012_preserves_existing_workspaces_and_adds_empty_document_history(
+    catalog_settings: Settings,
+) -> None:
+    catalog_settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+    command.upgrade(alembic_config(catalog_settings), "0011_edit_plan_guidance")
+    engine = create_catalog_engine(catalog_settings)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """INSERT INTO producer_workspaces
+                   (id, story_external_id, title, plan_document_sha256, plan_json, status)
+                   VALUES ('workspace-docs', 'story-docs', 'Document Story', :sha,
+                           :plan, 'in_production')"""
+            ),
+            {"sha": "b" * 64, "plan": '{"document_type":"visual_plan"}'},
+        )
+    engine.dispose()
+
+    command.upgrade(alembic_config(catalog_settings), "0012_story_documents")
+    upgraded = create_catalog_engine(catalog_settings)
+    with upgraded.connect() as connection:
+        assert connection.execute(
+            text("SELECT story_external_id FROM producer_workspaces WHERE id='workspace-docs'")
+        ).scalar_one() == "story-docs"
+        assert connection.execute(
+            text("SELECT count(*) FROM story_document_versions")
+        ).scalar_one() == 0
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
     upgraded.dispose()
