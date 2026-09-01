@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 import unicodedata
 import warnings
 from contextlib import closing
@@ -292,7 +293,7 @@ class AcquisitionService:
                 destination.resolve(strict=False).relative_to(allowed_parent.resolve())
                 if not destination.is_file() and staging.is_file():
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(staging, destination)
+                    _finalize_staged_file(staging, destination)
                 if not destination.is_file():
                     raise MediaDownloadError("No validated media file survived the interrupted acquisition")
                 actual_sha, actual_size = _file_sha256(destination)
@@ -446,7 +447,7 @@ class AcquisitionService:
                     context,
                 )
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(downloaded.temporary_path, destination)
+                _finalize_staged_file(downloaded.temporary_path, destination)
 
                 relative_path = self._library_relative_path(destination)
                 destination_stat = destination.stat()
@@ -673,7 +674,7 @@ class AcquisitionService:
             session, history, result, downloaded, observed, destination, context
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(downloaded.temporary_path, destination)
+        _finalize_staged_file(downloaded.temporary_path, destination)
         stat = destination.stat()
         now = _utcnow()
         relative = self._library_relative_path(destination)
@@ -1318,6 +1319,27 @@ def _storage_path(root: Path, logical_root: str, relative_path: str) -> Path:
     if not normalized.startswith(prefix):
         raise MediaDownloadError(f"Unsafe {logical_root.lower()}-relative path")
     return _safe_root_relative(root, normalized[len(prefix):])
+
+
+def _finalize_staged_file(source: Path, destination: Path) -> None:
+    """Finalize a validated staged file, supporting independently mounted roots."""
+    try:
+        os.replace(source, destination)
+        return
+    except OSError as exc:
+        if exc.errno != getattr(os, "EXDEV", 18):
+            raise
+
+    sibling = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
+    try:
+        with source.open("rb") as source_handle, sibling.open("wb") as sibling_handle:
+            shutil.copyfileobj(source_handle, sibling_handle)
+            sibling_handle.flush()
+            os.fsync(sibling_handle.fileno())
+        os.replace(sibling, destination)
+    finally:
+        sibling.unlink(missing_ok=True)
+    source.unlink()
 
 
 def _remove_empty_parents(path: Path, stop: Path) -> None:

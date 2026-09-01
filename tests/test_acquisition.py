@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import errno
+import os
+import shutil
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -20,6 +23,7 @@ from yt_visuals.acquisition import (
     YT_VISUALS_USER_AGENT,
     safe_filename,
 )
+from yt_visuals.acquisition import _finalize_staged_file
 from yt_visuals.config import Settings
 from yt_visuals.database import initialize_database
 from yt_visuals.library import LibraryScanner
@@ -166,6 +170,100 @@ def test_download_timeout_is_recorded_as_clean_transfer_failure(catalog_settings
         assert history.status == "failed"
         assert history.error_category == "timeout"
         assert history.error_message == "Media download timed out"
+    engine.dispose()
+
+
+def test_staged_file_finalization_supports_same_and_cross_filesystem_paths(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "temp" / "download.part"
+    destination = tmp_path / "library" / "asset.jpg"
+    source.parent.mkdir()
+    destination.parent.mkdir()
+    content = jpeg_bytes()
+    source.write_bytes(content)
+
+    _finalize_staged_file(source, destination)
+
+    assert destination.read_bytes() == content
+    assert not source.exists()
+
+    source.write_bytes(content)
+    destination.unlink()
+    real_replace = os.replace
+    calls = 0
+
+    def replace_with_exdev(src, dst):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_with_exdev)
+    _finalize_staged_file(source, destination)
+
+    assert calls == 2
+    assert destination.read_bytes() == content
+    assert not source.exists()
+    assert list(destination.parent.glob(f".{destination.name}.*.part")) == []
+
+
+def test_staged_file_finalization_cleans_destination_temp_on_copy_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "temp" / "download.part"
+    destination = tmp_path / "library" / "asset.jpg"
+    source.parent.mkdir()
+    destination.parent.mkdir()
+    source.write_bytes(jpeg_bytes())
+    monkeypatch.setattr(os, "replace", lambda src, dst: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross-device link")))
+
+    def fail_copy(source_handle, destination_handle):
+        destination_handle.write(b"partial")
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(shutil, "copyfileobj", fail_copy)
+    with pytest.raises(OSError, match="copy failed"):
+        _finalize_staged_file(source, destination)
+
+    assert source.exists()
+    assert not destination.exists()
+    assert list(destination.parent.glob(f".{destination.name}.*.part")) == []
+
+
+def test_acquisition_finalization_failure_keeps_history_failed_and_asset_hidden(
+    catalog_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = initialize_database(catalog_settings)
+    service = AcquisitionService(
+        catalog_settings,
+        engine,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, headers={"Content-Type": "image/jpeg"}, content=jpeg_bytes()
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda src, dst: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross-device link")),
+    )
+    monkeypatch.setattr(shutil, "copyfileobj", lambda src, dst: (_ for _ in ()).throw(OSError("copy failed")))
+
+    with pytest.raises(OSError, match="copy failed"):
+        service.acquire(photo_result("906"))
+
+    assert list((catalog_settings.root / "Library").rglob("*.jpg")) == []
+    with Session(engine) as session:
+        history = session.scalar(select(MediaDownload))
+        assert history is not None
+        assert history.status == "failed"
+        assert history.error_message == "copy failed"
+        assert session.scalar(select(MediaAsset)) is None
     engine.dispose()
 
 
