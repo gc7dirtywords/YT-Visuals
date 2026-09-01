@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import unicodedata
 import warnings
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,7 @@ SENSITIVE_METADATA_KEYS = {
 PEXELS_DOWNLOAD_HOSTS = frozenset(
     {"images.pexels.com", "videos.pexels.com", "player.vimeo.com"}
 )
+PEXELS_MEDIA_USER_AGENT = "YT-ChannelOps"
 YT_VISUALS_USER_AGENT = "YT-Visuals/0.1 (https://github.com/gc7dirtywords/YT-Visuals)"
 IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
 VIDEO_MIME_TYPES = frozenset(
@@ -233,13 +235,13 @@ class AcquisitionService:
         *,
         http_client: httpx.Client | None = None,
         metadata_probe: MetadataProbe = probe_media_file,
-        timeout_seconds: float = 60.0,
+        timeout_seconds: float = 30.0,
         allowed_download_hosts: frozenset[str] | set[str] | None = None,
     ) -> None:
         self.settings = settings
         self.engine = engine
         self.metadata_probe = metadata_probe
-        self.timeout_seconds = timeout_seconds
+        self.timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 10.0))
         self.allowed_download_hosts = frozenset(
             host.casefold() for host in (allowed_download_hosts or PEXELS_DOWNLOAD_HOSTS)
         )
@@ -866,9 +868,8 @@ class AcquisitionService:
         try:
             with handle:
                 try:
-                    with self.http_client.stream(
-                        "GET", result.download_url, timeout=self.timeout_seconds, follow_redirects=True
-                    ) as response:
+                    request = self._download_request(result.download_url, result.provider)
+                    with closing(self.http_client.send(request, stream=True, auth=None, follow_redirects=True)) as response:
                         http_status_code = response.status_code
                         content_type = response.headers.get("Content-Type")
                         self._validate_download_url(str(response.url))
@@ -954,6 +955,15 @@ class AcquisitionService:
             temporary_path.unlink(missing_ok=True)
             _remove_empty_parents(temporary_path.parent, self.settings.root / "Temp")
             raise
+
+    def _download_request(self, url: str, provider: str) -> httpx.Request:
+        headers: dict[str, str] | None = None
+        if provider.casefold() == "pexels" and _is_pexels_cdn_url(url):
+            headers = {"User-Agent": PEXELS_MEDIA_USER_AGENT}
+        request = self.http_client.build_request("GET", url, headers=headers, timeout=self.timeout)
+        if headers is not None:
+            request.headers.pop("Authorization", None)
+        return request
 
     def _validate_download_url(self, url: str) -> None:
         parsed = urlsplit(url)
@@ -1245,6 +1255,13 @@ def _extension_for(mime_type: str | None, url: str) -> str:
 def _original_filename(url: str) -> str | None:
     name = unquote(Path(urlsplit(url).path).name).strip()
     return name[:512] or None
+
+
+def _is_pexels_cdn_url(url: str) -> bool:
+    return (urlsplit(url).hostname or "").casefold() in {
+        "images.pexels.com",
+        "videos.pexels.com",
+    }
 
 
 def _library_directory(media_type: str) -> str:

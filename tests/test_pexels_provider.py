@@ -160,6 +160,7 @@ def test_get_photo_and_video_use_current_v1_endpoints() -> None:
     paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "test-key"
         paths.append(request.url.path)
         return httpx.Response(200, json=PHOTO if "photos" in request.url.path else VIDEO)
 

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from yt_visuals.acquisition import (
     AcquisitionContext,
     AcquisitionService,
+    PEXELS_MEDIA_USER_AGENT,
     ProbeResult,
     YT_VISUALS_USER_AGENT,
     safe_filename,
@@ -83,6 +84,52 @@ def test_owned_http_client_uses_descriptive_user_agent(catalog_settings: Setting
     service = AcquisitionService(catalog_settings, engine)
     assert service.http_client.headers["User-Agent"] == YT_VISUALS_USER_AGENT
     service.close()
+    engine.dispose()
+
+
+def test_pexels_cdn_download_uses_user_agent_without_authorization(
+    catalog_settings: Settings,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["User-Agent"] == PEXELS_MEDIA_USER_AGENT
+        assert "Authorization" not in request.headers
+        return httpx.Response(200, headers={"Content-Type": "image/jpeg"}, content=jpeg_bytes())
+
+    engine = initialize_database(catalog_settings)
+    service = AcquisitionService(
+        catalog_settings,
+        engine,
+        http_client=httpx.Client(
+            headers={"Authorization": "secret-that-must-not-reach-the-cdn"},
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    service.acquire(photo_result())
+
+    engine.dispose()
+
+
+def test_download_timeout_is_recorded_as_clean_transfer_failure(catalog_settings: Settings) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    engine = initialize_database(catalog_settings)
+    service = AcquisitionService(
+        catalog_settings,
+        engine,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(MediaDownloadError, match="Media download timed out"):
+        service.acquire(photo_result("904"))
+
+    with Session(engine) as session:
+        history = session.scalar(select(MediaDownload))
+        assert history is not None
+        assert history.status == "failed"
+        assert history.error_category == "timeout"
+        assert history.error_message == "Media download timed out"
     engine.dispose()
 
 
