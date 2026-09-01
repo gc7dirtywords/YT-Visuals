@@ -276,9 +276,9 @@ class AcquisitionService:
                 return False
             metadata = history.request_metadata if isinstance(history.request_metadata, dict) else {}
             if metadata.get("stage") != "validated":
-                partial = self.settings.root / "Temp" / "acquisitions" / str(history_id) / "download.part"
+                partial = self.settings.temp_root / "acquisitions" / str(history_id) / "download.part"
                 partial.unlink(missing_ok=True)
-                _remove_empty_parents(partial.parent, self.settings.root / "Temp")
+                _remove_empty_parents(partial.parent, self.settings.temp_root)
                 history.status = "failed"
                 history.completed_at = _utcnow()
                 history.error_category = "interrupted"
@@ -286,9 +286,9 @@ class AcquisitionService:
                 session.commit()
                 return False
             try:
-                staging = _safe_root_relative(self.settings.root, metadata["staging_relative_path"])
-                destination = _safe_root_relative(self.settings.root, metadata["intended_relative_path"])
-                allowed_parent = self.settings.root / "Library" / _library_directory(history.media_type)
+                staging = self._temp_path(metadata["staging_relative_path"])
+                destination = self._library_path(metadata["intended_relative_path"])
+                allowed_parent = self.settings.library_root / _library_directory(history.media_type)
                 destination.resolve(strict=False).relative_to(allowed_parent.resolve())
                 if not destination.is_file() and staging.is_file():
                     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -302,7 +302,7 @@ class AcquisitionService:
                 observed = ObservedMedia(**metadata["observed_media"])
                 asset = session.scalar(select(MediaAsset).where(MediaAsset.sha256 == actual_sha))
                 now = _utcnow()
-                relative = destination.relative_to(self.settings.root).as_posix()
+                relative = self._library_relative_path(destination)
                 stat = destination.stat()
                 if asset is None:
                     asset = MediaAsset(
@@ -343,7 +343,7 @@ class AcquisitionService:
                     request_metadata={"network_transfer": True, "recovered": True},
                 )
                 session.commit()
-                _remove_empty_parents(staging.parent, self.settings.root / "Temp")
+                _remove_empty_parents(staging.parent, self.settings.temp_root)
                 return True
             except Exception as exc:
                 session.rollback()
@@ -366,7 +366,7 @@ class AcquisitionService:
             if "downloaded" in locals():
                 downloaded.temporary_path.unlink(missing_ok=True)
                 _remove_empty_parents(
-                    downloaded.temporary_path.parent, self.settings.root / "Temp"
+                    downloaded.temporary_path.parent, self.settings.temp_root
                 )
             raise
 
@@ -448,7 +448,7 @@ class AcquisitionService:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(downloaded.temporary_path, destination)
 
-                relative_path = destination.relative_to(self.settings.root).as_posix()
+                relative_path = self._library_relative_path(destination)
                 destination_stat = destination.stat()
                 observed_at = _utcnow()
                 asset = MediaAsset(
@@ -515,7 +515,7 @@ class AcquisitionService:
             raise
         finally:
             downloaded.temporary_path.unlink(missing_ok=True)
-            _remove_empty_parents(downloaded.temporary_path.parent, self.settings.root / "Temp")
+            _remove_empty_parents(downloaded.temporary_path.parent, self.settings.temp_root)
 
     def _validated_file_survives(self, history_id: int) -> bool:
         try:
@@ -524,9 +524,7 @@ class AcquisitionService:
                 metadata = history.request_metadata if history else None
                 if not isinstance(metadata, dict) or metadata.get("stage") != "validated":
                     return False
-                destination = _safe_root_relative(
-                    self.settings.root, str(metadata.get("intended_relative_path", ""))
-                )
+                destination = self._library_path(str(metadata.get("intended_relative_path", "")))
                 return destination.is_file()
         except Exception:
             return False
@@ -617,14 +615,14 @@ class AcquisitionService:
             if location.status != "available":
                 continue
             try:
-                path = _safe_root_relative(self.settings.root, location.relative_path)
+                path = self._library_path(location.relative_path)
             except MediaDownloadError:
                 continue
             if path.is_file():
                 return True
         if not asset.locations and asset.status == "active":
             try:
-                return _safe_root_relative(self.settings.root, asset.relative_path).is_file()
+                return self._library_path(asset.relative_path).is_file()
             except MediaDownloadError:
                 return False
         return False
@@ -639,9 +637,7 @@ class AcquisitionService:
         destination: Path,
         context: AcquisitionContext | None,
     ) -> None:
-        relative = destination.resolve(strict=False).relative_to(
-            self.settings.root.resolve()
-        ).as_posix()
+        relative = self._library_relative_path(destination)
         if history.status != "started":
             raise MediaDownloadError("Download history is not available for finalization")
         history.relative_path = relative
@@ -655,9 +651,7 @@ class AcquisitionService:
             "selection": context.to_metadata() if context else {},
             "normalized_result": _sanitize_metadata(result.to_dict()),
             "observed_media": asdict(observed),
-            "staging_relative_path": downloaded.temporary_path.relative_to(
-                self.settings.root
-            ).as_posix(),
+            "staging_relative_path": self._temp_relative_path(downloaded.temporary_path),
             "intended_relative_path": relative,
         }
         session.commit()
@@ -682,7 +676,7 @@ class AcquisitionService:
         os.replace(downloaded.temporary_path, destination)
         stat = destination.stat()
         now = _utcnow()
-        relative = destination.relative_to(self.settings.root).as_posix()
+        relative = self._library_relative_path(destination)
         asset.relative_path = relative
         asset.status = "active"
         asset.mime_type = observed.mime_type
@@ -851,7 +845,7 @@ class AcquisitionService:
 
     def _download(self, result: MediaSearchResult, history_id: int) -> DownloadedFile:
         self._validate_download_url(result.download_url)
-        staging_dir = self.settings.root / "Temp" / "acquisitions" / str(history_id)
+        staging_dir = self.settings.temp_root / "acquisitions" / str(history_id)
         staging_dir.mkdir(parents=True, exist_ok=True)
         temporary_path = staging_dir / "download.part"
         temporary_path.unlink(missing_ok=True)
@@ -953,7 +947,7 @@ class AcquisitionService:
             )
         except Exception:
             temporary_path.unlink(missing_ok=True)
-            _remove_empty_parents(temporary_path.parent, self.settings.root / "Temp")
+            _remove_empty_parents(temporary_path.parent, self.settings.temp_root)
             raise
 
     def _download_request(self, url: str, provider: str) -> httpx.Request:
@@ -964,6 +958,18 @@ class AcquisitionService:
         if headers is not None:
             request.headers.pop("Authorization", None)
         return request
+
+    def _library_relative_path(self, path: Path) -> str:
+        return f"Library/{path.resolve(strict=False).relative_to(self.settings.library_root.resolve()).as_posix()}"
+
+    def _library_path(self, relative_path: str) -> Path:
+        return _storage_path(self.settings.library_root, "Library", relative_path)
+
+    def _temp_relative_path(self, path: Path) -> str:
+        return f"Temp/{path.resolve(strict=False).relative_to(self.settings.temp_root.resolve()).as_posix()}"
+
+    def _temp_path(self, relative_path: str) -> Path:
+        return _storage_path(self.settings.temp_root, "Temp", relative_path)
 
     def _validate_download_url(self, url: str) -> None:
         parsed = urlsplit(url)
@@ -1160,7 +1166,7 @@ class AcquisitionService:
             license_record.verified_at = reviewed_at
 
     def _destination_path(self, result: MediaSearchResult, filename: str) -> Path:
-        directory = self.settings.root / "Library" / _library_directory(result.media_type)
+        directory = self.settings.library_root / _library_directory(result.media_type)
         candidate = directory / filename
         counter = 2
         while candidate.exists():
@@ -1304,6 +1310,14 @@ def _safe_root_relative(root: Path, relative_path: str) -> Path:
     except ValueError as exc:
         raise MediaDownloadError("Catalog path escapes the configured root") from exc
     return resolved
+
+
+def _storage_path(root: Path, logical_root: str, relative_path: str) -> Path:
+    normalized = relative_path.replace("\\", "/")
+    prefix = f"{logical_root}/"
+    if not normalized.startswith(prefix):
+        raise MediaDownloadError(f"Unsafe {logical_root.lower()}-relative path")
+    return _safe_root_relative(root, normalized[len(prefix):])
 
 
 def _remove_empty_parents(path: Path, stop: Path) -> None:

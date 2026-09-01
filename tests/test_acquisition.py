@@ -87,6 +87,42 @@ def test_owned_http_client_uses_descriptive_user_agent(catalog_settings: Setting
     engine.dispose()
 
 
+def test_acquisition_uses_independent_library_root_with_existing_relative_path_contract(
+    catalog_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library_root = catalog_settings.root.parent / "mounted-library"
+    temp_root = catalog_settings.root.parent / "mounted-temp"
+    for directory in (library_root / "Images", library_root / "Videos", library_root / "SFX", temp_root):
+        directory.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("YT_CHANNELOPS_LIBRARY_ROOT", str(library_root))
+    monkeypatch.setenv("YT_CHANNELOPS_TEMP_ROOT", str(temp_root))
+
+    engine = initialize_database(catalog_settings)
+    service = AcquisitionService(
+        catalog_settings,
+        engine,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, headers={"Content-Type": "image/jpeg"}, content=jpeg_bytes()
+                )
+            )
+        ),
+    )
+
+    outcome = service.acquire(photo_result("696407"))
+
+    assert outcome.relative_path.startswith("Library/Images/")
+    assert (library_root / outcome.relative_path.removeprefix("Library/")).is_file()
+    assert not (catalog_settings.root / outcome.relative_path).exists()
+    assert LibraryScanner(catalog_settings, engine).scan().files_scanned == 1
+    with Session(engine) as session:
+        asset = session.get(MediaAsset, outcome.asset_id)
+        assert asset is not None
+        assert asset.relative_path == outcome.relative_path
+    engine.dispose()
+
+
 def test_pexels_cdn_download_uses_user_agent_without_authorization(
     catalog_settings: Settings,
 ) -> None:

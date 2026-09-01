@@ -69,7 +69,7 @@ class LibraryScanner:
         self.inspector = inspector
 
     def scan(self, *, dry_run: bool = False, verbose: bool = False) -> ScanSummary:
-        candidates, discovery_errors, skipped_symlinks = discover_library_files(self.settings.root)
+        candidates, discovery_errors, skipped_symlinks = discover_library_files(self.settings.library_root)
         summary = ScanSummary(
             dry_run=dry_run,
             files_scanned=len(candidates),

@@ -65,14 +65,14 @@ class DiscoveryError:
     message: str
 
 
-def discover_library_files(root: Path) -> tuple[list[Candidate], list[DiscoveryError], int]:
+def discover_library_files(library_root: Path) -> tuple[list[Candidate], list[DiscoveryError], int]:
     candidates: list[Candidate] = []
     errors: list[DiscoveryError] = []
     skipped_symlinks = 0
     library_roots = (
-        (root / "Library" / "Images", "image", IMAGE_EXTENSIONS),
-        (root / "Library" / "Videos", "video", VIDEO_EXTENSIONS),
-        (root / "Library" / "SFX", "audio", AUDIO_EXTENSIONS),
+        (library_root / "Images", "image", IMAGE_EXTENSIONS),
+        (library_root / "Videos", "video", VIDEO_EXTENSIONS),
+        (library_root / "SFX", "audio", AUDIO_EXTENSIONS),
     )
 
     for scan_root, media_type, extensions in library_roots:
@@ -83,7 +83,7 @@ def discover_library_files(root: Path) -> tuple[list[Candidate], list[DiscoveryE
             try:
                 entries = list(os.scandir(directory))
             except OSError as exc:
-                errors.append(_discovery_error(root, directory, exc))
+                errors.append(_discovery_error(library_root, directory, exc))
                 continue
             for entry in entries:
                 path = Path(entry.path)
@@ -106,7 +106,7 @@ def discover_library_files(root: Path) -> tuple[list[Candidate], list[DiscoveryE
                     if extension not in extensions:
                         continue
                     stat = entry.stat(follow_symlinks=False)
-                    relative_path = path.relative_to(root).as_posix()
+                    relative_path = f"Library/{path.relative_to(library_root).as_posix()}"
                     candidates.append(
                         Candidate(
                             absolute_path=path,
@@ -119,7 +119,7 @@ def discover_library_files(root: Path) -> tuple[list[Candidate], list[DiscoveryE
                         )
                     )
                 except OSError as exc:
-                    errors.append(_discovery_error(root, path, exc))
+                    errors.append(_discovery_error(library_root, path, exc))
     candidates.sort(key=lambda item: item.relative_path.casefold())
     return candidates, errors, skipped_symlinks
 
