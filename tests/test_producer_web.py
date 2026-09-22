@@ -496,9 +496,10 @@ def test_workspace_renders_sticky_progress_navigation_and_external_import(
     assert b'class="unselected" data-beat-link="beat-001"' in response.data
     assert b'id="beat-001" data-beat-card' in response.data
     assert b"External / Other Source" in response.data
-    assert b"Local Library / Upload" in response.data
+    assert b"<summary>Upload</summary>" in response.data
+    assert b"<summary>Local Library</summary>" in response.data
     assert b"<summary>Pexels</summary>" in response.data
-    assert b'<details class="sourcing-panel local" >' in response.data
+    assert b'<details class="sourcing-panel local local-library" >' in response.data
     assert b'<details class="sourcing-panel pexels" >' in response.data
     assert b'<details class="sourcing-panel external" >' in response.data
     assert b'name="direct_media_url"' in response.data
@@ -787,6 +788,54 @@ def test_completed_beats_default_collapsed_and_focus_expands(catalog_settings: S
     assert b'beat-card completed' in collapsed.data
     assert b'<details class="beat-disclosure" >' in collapsed.data
     assert b'<details class="beat-disclosure" open>' in focused.data
+    engine.dispose()
+
+
+def test_phase9c_upload_first_and_sfx_resolution_controls(catalog_settings: Settings) -> None:
+    engine = initialize_database(catalog_settings)
+    service = ProducerWorkflowService(catalog_settings, engine)
+    from yt_visuals.producer.contracts import VisualPlan
+
+    plan = VisualPlan.model_validate_json(_plan_bytes()).model_dump(mode="json")
+    plan["beats"][0]["production_opportunities"] = [{
+        "trigger": "Door closes.",
+        "sfx_recommendation": {
+            "type": "sfx", "purpose": "Impact", "sfx_kind": "one_shot",
+            "desired_sound": "door thud", "search_queries": ["door thud"],
+            "intensity": "subtle", "note": "Keep restrained.",
+        },
+    }]
+    imported = service.import_plan(VisualPlan.model_validate(plan))
+    workspace = service.get_workspace(imported["workspace_id"], include_candidates=False)
+    beat = workspace["beats"][0]
+    app = create_app(catalog_settings, engine=engine, service=service)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+
+    initial = client.get(f"/stories/{imported['workspace_id']}").data
+    assert initial.index(b"<summary>Upload</summary>") < initial.index(b"<summary>Local Library</summary>") < initial.index(b"<summary>Pexels</summary>")
+    assert initial.index(b"Recommended searches") < initial.index(b"<summary>SFX")
+    assert b'<details class="sourcing-panel upload" open>' in initial
+    assert b'<details class="sourcing-panel local local-library" >' in initial
+    assert b"SFX !" in initial
+
+    client.post(
+        f"/stories/{imported['workspace_id']}/beats/{beat['id']}/upload",
+        data={"media_file": (_jpeg(), "selected.jpg")},
+        content_type="multipart/form-data",
+    )
+    unresolved = client.get(f"/stories/{imported['workspace_id']}").data
+    assert b"SFX OUTSTANDING" in unresolved
+    assert b'<details class="beat-disclosure" open>' in unresolved
+    skipped = client.post(
+        f"/stories/{imported['workspace_id']}/beats/{beat['id']}/sfx/skip",
+        follow_redirects=True,
+    )
+    assert b"SFX skipped for this beat" in skipped.data
+    resolved = client.get(f"/stories/{imported['workspace_id']}").data
+    assert b"SFX \xe2\x9c\x93" in resolved
+    assert b'beat-card completed fully-resolved' in resolved
+    assert b'<details class="beat-disclosure" >' in resolved
     engine.dispose()
 
 
@@ -1137,7 +1186,7 @@ def test_existing_media_search_redirects_to_same_local_beat_and_keeps_query(
     assert search.headers["Location"].endswith("#beat-001")
     rendered = client.get(search.headers["Location"])
     assert b'value="closed door"' in rendered.data
-    assert b'<details class="sourcing-panel local" open>' in rendered.data
+    assert b'<details class="sourcing-panel local local-library" open>' in rendered.data
     assert b'<details class="beat-disclosure" open>' in rendered.data
     assert b"Catalog asset" in rendered.data
 
@@ -1148,13 +1197,13 @@ def test_existing_media_search_redirects_to_same_local_beat_and_keeps_query(
     )
     assert b"No existing catalog media matched" in no_results.data
     assert b"No matching existing catalog media" in no_results.data
-    assert b'<details class="sourcing-panel local" open>' in no_results.data
+    assert b'<details class="sourcing-panel local local-library" open>' in no_results.data
     empty = client.post(
         f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/search",
         data={"local_query": ""}, follow_redirects=True,
     )
     assert b"Enter a catalog search term" in empty.data
-    assert b'<details class="sourcing-panel local" open>' in empty.data
+    assert b'<details class="sourcing-panel local local-library" open>' in empty.data
     engine.dispose()
 
 
@@ -1182,7 +1231,7 @@ def test_incompatible_catalog_selection_is_visible_and_can_be_overridden(catalog
         follow_redirects=True,
     )
     assert b"currently prefers an image" in failed.data
-    assert b'<details class="sourcing-panel local" open>' in failed.data
+    assert b'<details class="sourcing-panel local local-library" open>' in failed.data
     assert b'<details class="beat-disclosure" open>' in failed.data
     overridden = client.post(
         f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/select/{asset_id}",

@@ -39,7 +39,7 @@ document.querySelector("[data-expand-all]")?.addEventListener("click", () => {
 });
 
 document.querySelector("[data-collapse-completed]")?.addEventListener("click", () => {
-  document.querySelectorAll(".beat-card.completed .beat-disclosure").forEach((item) => { item.open = false; });
+  document.querySelectorAll(".beat-card.fully-resolved .beat-disclosure").forEach((item) => { item.open = false; });
 });
 
 const openHashBeat = () => {

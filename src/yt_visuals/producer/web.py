@@ -463,6 +463,12 @@ def create_app(
         flash("SFX selection removed.", "success")
         return _beat_redirect(service, workspace_id, beat_id, panel="sfx")
 
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/sfx/skip")
+    def skip_sfx(workspace_id: str, beat_id: str):
+        service.skip_sfx(workspace_id, beat_id)
+        flash("SFX skipped for this beat.", "success")
+        return _beat_redirect(service, workspace_id, beat_id, panel="sfx")
+
     @app.post("/stories/<workspace_id>/organization/status")
     def update_workspace_status(workspace_id: str):
         service.update_workspace_status(workspace_id, request.form.get("status", "")); flash("Workspace status updated.", "success")

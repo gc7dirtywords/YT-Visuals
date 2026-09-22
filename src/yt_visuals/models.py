@@ -948,6 +948,7 @@ class ProducerBeat(TimestampMixin, Base):
     )
     selected_sfx_asset_sha256: Mapped[str | None] = mapped_column(String(64))
     selected_sfx_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sfx_skipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     edit_motion_recommendation_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     edit_transition_recommendation_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     producer_motion_type: Mapped[str | None] = mapped_column(String(24))

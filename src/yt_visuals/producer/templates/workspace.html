@@ -73,7 +73,7 @@
         <strong class="toolbar-title" title="{{ workspace.title }}">{{ workspace.title }}</strong>
         <span class="toolbar-progress"><b>{{ workspace.selected }} / {{ workspace.total }}</b> SELECTED</span>
         <span class="toolbar-storyboard">{{ 'Storyboard ready' if workspace.storyboard.exists else 'Storyboard pending' }}</span>
-        <div class="toolbar-actions"><button type="button" data-expand-all>Expand All</button><button type="button" data-collapse-completed>Collapse Completed</button></div>
+        <div class="toolbar-actions"><button type="button" data-expand-all>Expand All</button><button type="button" data-collapse-completed>Collapse Resolved</button></div>
       </section>
 
   <div class="workspace-layout">
@@ -89,11 +89,13 @@
     <div class="beats">
       {% for beat in workspace.beats %}
       {% set spec = beat.specification %}
-      <article class="beat-card {{ 'completed' if beat.selected else 'incomplete' }}" id="{{ beat.beat_id }}" data-beat-card>
-        <details class="beat-disclosure" {% if not beat.selected or focused_beat == beat.beat_id %}open{% endif %}>
+      {% set sfx_resolved = beat.selected_sfx or beat.sfx_skipped or not beat.sfx_recommendations %}
+      {% set fully_resolved = beat.selected and sfx_resolved %}
+      <article class="beat-card {{ 'completed' if fully_resolved else 'incomplete' }} {{ 'fully-resolved' if fully_resolved else '' }}" id="{{ beat.beat_id }}" data-beat-card>
+        <details class="beat-disclosure" {% if not fully_resolved or focused_beat == beat.beat_id %}open{% endif %}>
           <summary class="beat-heading">
             <div><span class="sequence">{{ "%03d"|format(beat.sequence) }}</span><span><h2>{{ beat.beat_id }}</h2><small>{{ spec.desired_visual }}{% if beat.plan_needs_review %} · Plan review needed{% endif %}</small></span></div>
-            <div class="beat-summary"><span class="completion-state">{{ '✓ SELECTED' if beat.selected else '○ NEEDS MEDIA' }}</span>{% if beat.selected %}<span>Asset {{ beat.selected.asset_id }} · {{ beat.selected.license.name or 'UNKNOWN' }}</span>{% endif %}<span class="badges"><span>{{ spec.media_preference }}</span><span>{{ spec.source_requirement }}</span></span></div>
+            <div class="beat-summary"><span class="completion-state">{{ '✓ RESOLVED' if fully_resolved else ('○ NEEDS MEDIA' if not beat.selected else '○ SFX OUTSTANDING') }}</span>{% if beat.selected %}<span>Asset {{ beat.selected.asset_id }} · {{ beat.selected.license.name or 'UNKNOWN' }}</span>{% endif %}<span class="sfx-status" title="{% if not beat.sfx_recommendations %}No SFX recommendation{% elif beat.selected_sfx %}SFX selected{% elif beat.sfx_skipped %}SFX skipped{% else %}SFX recommendation outstanding{% endif %}">{% if not beat.sfx_recommendations %}SFX —{% elif beat.selected_sfx or beat.sfx_skipped %}SFX ✓{% else %}SFX !{% endif %}</span><span class="badges"><span>{{ spec.media_preference }}</span><span>{{ spec.source_requirement }}</span></span></div>
           </summary>
           <div class="beat-content">
         <div class="brief-grid">
@@ -140,8 +142,13 @@
           </details>
         {% endif %}
 
+        <section class="queries recommended-searches">
+          <h3>Recommended searches</h3>
+          <div>{% for query in spec.search_queries %}<button type="button" class="query" data-copy="{{ query }}">{{ query }} <span>Copy</span></button>{% endfor %}</div>
+        </section>
+
         <details class="sfx-section" {% if focused_beat == beat.beat_id and open_panel == 'sfx' %}open{% endif %}>
-          <summary>SFX{% if beat.selected_sfx %} · Selected{% elif beat.sfx_recommendations %} · Project recommendation{% endif %}</summary>
+          <summary>SFX{% if beat.selected_sfx %} · Selected{% elif beat.sfx_skipped %} · Skipped{% elif beat.sfx_recommendations %} · Project recommendation{% endif %}</summary>
           <div class="sfx-body">
             {% for recommendation in beat.sfx_recommendations %}
               <div class="sfx-recommendation">
@@ -164,6 +171,7 @@
                 <form action="{{ url_for('clear_sfx', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><button type="submit">Remove Selected SFX</button></form>
               </div>
             {% endif %}
+            {% if beat.sfx_recommendations and not beat.selected_sfx %}<form action="{{ url_for('skip_sfx', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><button type="submit">Skip SFX for this beat</button></form>{% endif %}
 
             <div class="existing-media-search"><h3>Search SFX Library</h3><form action="{{ url_for('search_sfx_media', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post"><input type="search" name="sfx_query" value="{{ request.args.get('sfx_query', '') if request.args.get('sfx_beat') == beat.id else '' }}" placeholder="Search cataloged SFX"><button type="submit">Search</button></form></div>
             {% set sfx_results = beat.sfx_search if beat.sfx_search else beat.sfx_candidates %}
@@ -177,11 +185,6 @@
             </details>
           </div>
         </details>
-
-        <section class="queries">
-          <h3>Recommended searches</h3>
-          <div>{% for query in spec.search_queries %}<button type="button" class="query" data-copy="{{ query }}">{{ query }} <span>Copy</span></button>{% endfor %}</div>
-        </section>
 
         <section class="selection-panel">
           <h3>Current selection</h3>
@@ -206,8 +209,19 @@
         </section>
 
         <section class="sourcing-sections">
-          <details class="sourcing-panel local" {% if focused_beat == beat.beat_id and open_panel == 'local' %}open{% endif %}>
-            <summary>Local Library / Upload</summary>
+          <details class="sourcing-panel upload" open>
+            <summary>Upload</summary>
+            <div class="sourcing-body upload-source">
+              <h3>Upload a local file</h3>
+              <form action="{{ url_for('upload_media', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post" enctype="multipart/form-data">
+                <input type="file" name="media_file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,.mkv,.m4v" required>
+                <button class="primary" type="submit">Upload &amp; Use</button>
+              </form>
+              <small>Uploads are validated, SHA-256 deduplicated, and cataloged without an invented license.</small>
+            </div>
+          </details>
+          <details class="sourcing-panel local local-library" {% if focused_beat == beat.beat_id and open_panel == 'local' %}open{% endif %}>
+            <summary>Local Library</summary>
             <div class="sourcing-body">
               <h3>Local catalog candidates</h3>
               {% if beat.candidates %}
@@ -234,14 +248,6 @@
               {% if beat.hidden_asset_ids %}
                 <details class="hidden-assets"><summary>{{ beat.hidden_asset_ids|length }} hidden for this beat</summary>{% for asset_id in beat.hidden_asset_ids %}<form action="{{ url_for('restore_asset', workspace_id=workspace.workspace_id, beat_id=beat.id, asset_id=asset_id) }}" method="post"><button type="submit">Restore asset {{ asset_id }}</button></form>{% endfor %}</details>
               {% endif %}
-              <div class="upload-source">
-                <h3>Upload a local file</h3>
-                <form action="{{ url_for('upload_media', workspace_id=workspace.workspace_id, beat_id=beat.id) }}" method="post" enctype="multipart/form-data">
-                  <input type="file" name="media_file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,.mkv,.m4v" required>
-                  <button type="submit">Upload &amp; Use</button>
-                </form>
-                <small>Uploads are validated, SHA-256 deduplicated, and cataloged without an invented license.</small>
-              </div>
             </div>
           </details>
           <details class="sourcing-panel pexels" {% if focused_beat == beat.beat_id and open_panel == 'pexels' %}open{% endif %}>

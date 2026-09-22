@@ -444,6 +444,7 @@ class ProducerWorkflowService:
                     "specification": dict(beat.specification_json),
                     "selected_asset_id": beat.selected_asset_id,
                     "selected_sfx_asset_id": beat.selected_sfx_asset_id,
+                    "sfx_skipped": beat.sfx_skipped_at is not None,
                     "hidden_asset_ids": [item.asset_id for item in beat.hidden_assets],
                     "plan_needs_review": beat.plan_needs_review,
                     "edit_guidance": self._edit_guidance_view(beat),
@@ -2008,6 +2009,7 @@ class ProducerWorkflowService:
             beat.selected_sfx_asset_id = detail.asset_id
             beat.selected_sfx_asset_sha256 = detail.sha256
             beat.selected_sfx_at = datetime.now(timezone.utc)
+            beat.sfx_skipped_at = None
             session.commit()
         if rebuild_edit:
             self.build_edit_folder(workspace_id)
@@ -2020,6 +2022,18 @@ class ProducerWorkflowService:
             beat.selected_sfx_asset_id = None
             beat.selected_sfx_asset_sha256 = None
             beat.selected_sfx_at = None
+            beat.sfx_skipped_at = None
+            session.commit()
+        if rebuild_edit:
+            self.build_edit_folder(workspace_id)
+
+    def skip_sfx(self, workspace_id: str, beat_id: str, *, rebuild_edit: bool = True) -> None:
+        with Session(self.engine) as session:
+            beat = self._session_beat(session, workspace_id, beat_id)
+            beat.selected_sfx_asset_id = None
+            beat.selected_sfx_asset_sha256 = None
+            beat.selected_sfx_at = None
+            beat.sfx_skipped_at = datetime.now(timezone.utc)
             session.commit()
         if rebuild_edit:
             self.build_edit_folder(workspace_id)
