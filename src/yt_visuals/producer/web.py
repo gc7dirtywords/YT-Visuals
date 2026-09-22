@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import ipaddress
+import mimetypes
 import secrets
 import socket
 import uuid
@@ -84,6 +85,38 @@ def create_app(
             release=service.get_release(release_id, history_offset=_history_offset()),
             thumbnail_candidates=service.list_thumbnail_candidates(),
         )
+
+    @app.get("/releases/<release_id>/files")
+    def release_files(release_id: str) -> str:
+        release = service.get_release(release_id)
+        root = service.release_files_root(release_id)
+        files = service.browser_files(root)
+        for item in files:
+            item["view_url"] = url_for("view_release_file", release_id=release_id, relative_path=item["path"])
+            item["download_url"] = url_for("download_release_file", release_id=release_id, relative_path=item["path"])
+        return render_template(
+            "files.html",
+            title=f"{release['name']} · Files",
+            scope_label="Release",
+            subject_name=release["name"],
+            files=files,
+            zip_url=url_for("download_release_files", release_id=release_id),
+        )
+
+    @app.get("/releases/<release_id>/files/view/<path:relative_path>")
+    def view_release_file(release_id: str, relative_path: str):
+        path = service.browser_file_path(service.release_files_root(release_id), relative_path)
+        return send_file(path, mimetype=_file_mimetype(path), as_attachment=False, download_name=path.name, conditional=True)
+
+    @app.get("/releases/<release_id>/files/download/<path:relative_path>")
+    def download_release_file(release_id: str, relative_path: str):
+        path = service.browser_file_path(service.release_files_root(release_id), relative_path)
+        return send_file(path, mimetype=_file_mimetype(path), as_attachment=True, download_name=path.name, conditional=True)
+
+    @app.get("/releases/<release_id>/files.zip")
+    def download_release_files(release_id: str):
+        payload = service.browser_zip(service.release_files_root(release_id))
+        return send_file(payload, mimetype="application/zip", as_attachment=True, download_name=f"{release_id}-files.zip")
 
     @app.post("/releases")
     def create_release():
@@ -212,6 +245,19 @@ def create_app(
         path, artifact = service.release_artifact_path(release_id, artifact_id)
         return send_file(path, mimetype=artifact["mime_type"], as_attachment=artifact["artifact_type"] != "final_render", download_name=artifact["original_filename"], conditional=True)
 
+    @app.post("/releases/<release_id>/transcript")
+    def generate_release_transcript(release_id: str):
+        service.generate_release_transcript(release_id)
+        flash("Release YouTube transcript generated.", "success")
+        return redirect(url_for("release_detail", release_id=release_id))
+
+    @app.get("/releases/<release_id>/transcript/download")
+    def download_release_transcript(release_id: str):
+        path = service.release_artifacts_folder(release_id) / "Captions" / f"{release_id}_YouTube_Transcript.txt"
+        if not path.is_file():
+            raise ProducerWorkflowError("generate the release YouTube transcript first")
+        return send_file(path, mimetype="text/plain", as_attachment=True, download_name=path.name, conditional=True)
+
     @app.get("/settings/integrations")
     def integrations() -> str:
         return render_template(
@@ -313,6 +359,38 @@ def create_app(
             open_panel=request.args.get("panel"),
             releases=service.list_releases(show_released=False),
         )
+
+    @app.get("/stories/<workspace_id>/files")
+    def story_files(workspace_id: str) -> str:
+        workspace = service.get_workspace(workspace_id, include_candidates=False)
+        root = service.story_files_root(workspace_id)
+        files = service.browser_files(root)
+        for item in files:
+            item["view_url"] = url_for("view_story_file", workspace_id=workspace_id, relative_path=item["path"])
+            item["download_url"] = url_for("download_story_file", workspace_id=workspace_id, relative_path=item["path"])
+        return render_template(
+            "files.html",
+            title=f"{workspace['title']} · Files",
+            scope_label="Story",
+            subject_name=workspace["title"],
+            files=files,
+            zip_url=url_for("download_story_files", workspace_id=workspace_id),
+        )
+
+    @app.get("/stories/<workspace_id>/files/view/<path:relative_path>")
+    def view_story_file(workspace_id: str, relative_path: str):
+        path = service.browser_file_path(service.story_files_root(workspace_id), relative_path)
+        return send_file(path, mimetype=_file_mimetype(path), as_attachment=False, download_name=path.name, conditional=True)
+
+    @app.get("/stories/<workspace_id>/files/download/<path:relative_path>")
+    def download_story_file(workspace_id: str, relative_path: str):
+        path = service.browser_file_path(service.story_files_root(workspace_id), relative_path)
+        return send_file(path, mimetype=_file_mimetype(path), as_attachment=True, download_name=path.name, conditional=True)
+
+    @app.get("/stories/<workspace_id>/files.zip")
+    def download_story_files(workspace_id: str):
+        payload = service.browser_zip(service.story_files_root(workspace_id))
+        return send_file(payload, mimetype="application/zip", as_attachment=True, download_name=f"{workspace_id}-files.zip")
 
     @app.post("/stories/<workspace_id>/edit-plan")
     def import_edit_plan(workspace_id: str):
@@ -862,3 +940,7 @@ def _likely_lan_ip() -> str | None:
 
 def _concise(error: Exception) -> str:
     return " ".join(str(error).split())[:500]
+
+
+def _file_mimetype(path: Path) -> str:
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"

@@ -51,7 +51,7 @@ def test_release_artifact_upload_download_and_persistence(catalog_settings: Sett
     assert b"Release artifact stored as version 1" in uploaded.data
     detail = service.get_release(release["id"])
     artifact = next(group["current"] for group in detail["artifacts"] if group["artifact_type"] == "resolve_project")
-    assert (catalog_settings.root / "Releases" / release["id"] / artifact["stored_filename"]).is_file()
+    assert (catalog_settings.root / "Releases" / release["id"] / "DaVinci" / artifact["stored_filename"]).is_file()
     downloaded = client.get(f"/releases/{release['id']}/artifacts/{artifact['id']}/download")
     assert downloaded.status_code == 200 and downloaded.data == b"PK\x03\x04artifact"
     engine.dispose()

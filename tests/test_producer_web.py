@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import re
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -510,6 +511,52 @@ def test_workspace_renders_sticky_progress_navigation_and_external_import(
     engine.dispose()
 
 
+def test_browser_files_view_supports_story_release_view_download_and_zip(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, _beat = _workspace_client(catalog_settings)
+    workspace_id = workspace["workspace_id"]
+    story_root = catalog_settings.root / "Projects" / "Unassigned" / "web-story"
+    story_file = story_root / "Documents" / "historical.txt"
+    story_file.parent.mkdir(parents=True, exist_ok=True)
+    story_file.write_text("historical readable path", encoding="utf-8")
+
+    story_page = client.get(f"/stories/{workspace_id}/files")
+    assert story_page.status_code == 200
+    assert b"historical.txt" in story_page.data
+    assert b"Download Folder as ZIP" in story_page.data
+    story_view = client.get(f"/stories/{workspace_id}/files/view/Documents/historical.txt")
+    assert story_view.status_code == 200
+    assert story_view.data == b"historical readable path"
+    story_view.close()
+    story_download = client.get(f"/stories/{workspace_id}/files/download/Documents/historical.txt")
+    assert story_download.status_code == 200
+    assert "attachment" in story_download.headers["Content-Disposition"]
+    story_download.close()
+    story_zip = client.get(f"/stories/{workspace_id}/files.zip")
+    with zipfile.ZipFile(io.BytesIO(story_zip.data)) as archive:
+        assert archive.read("Documents/historical.txt") == b"historical readable path"
+    story_zip.close()
+
+    release = service.create_release("Browser Files")
+    service.assign_workspace_release(workspace_id, release["id"])
+    release_file = catalog_settings.root / "Releases" / release["id"] / "Other" / "release.txt"
+    release_file.parent.mkdir(parents=True, exist_ok=True)
+    release_file.write_text("release file", encoding="utf-8")
+    release_page = client.get(f"/releases/{release['id']}/files")
+    assert release_page.status_code == 200
+    assert b"release.txt" in release_page.data
+    release_view = client.get(f"/releases/{release['id']}/files/view/Other/release.txt")
+    assert release_view.status_code == 200
+    assert release_view.data == b"release file"
+    release_view.close()
+    release_zip = client.get(f"/releases/{release['id']}/files.zip")
+    with zipfile.ZipFile(io.BytesIO(release_zip.data)) as archive:
+        assert archive.read("Other/release.txt") == b"release file"
+    release_zip.close()
+    engine.dispose()
+
+
 def test_rendered_external_form_drives_full_wikimedia_import_and_persistence(
     catalog_settings: Settings,
 ) -> None:
@@ -775,7 +822,7 @@ def test_storyboard_generation_persists_controls_and_uses_trusted_paths(
         f"/stories/{workspace_id}/storyboard/folder",
         data={"path": "C:/untrusted"},
     )
-    expected = catalog_settings.root / "Projects/web-story/Edit/storyboard.pdf"
+    expected = catalog_settings.root / "Projects/Unassigned/web-story/Edit/storyboard.pdf"
     assert opened == [str(expected), str(expected.parent)]
     assert expected.is_file()
     engine.dispose()

@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import zipfile
 
@@ -186,7 +187,7 @@ def test_plan_import_local_candidates_selection_hide_restore_and_replace(
     service.select_asset(workspace["workspace_id"], beat["id"], first["asset_id"])
     selected = service.get_workspace(workspace["workspace_id"], include_candidates=False)
     assert selected["beats"][0]["selected"]["asset_id"] == first["asset_id"]
-    edit_visuals = catalog_settings.root / "Projects/producer-story/Edit/Visuals"
+    edit_visuals = catalog_settings.root / "Projects/Unassigned/producer-story/Edit/Visuals"
     assert len(list(edit_visuals.iterdir())) == 1
 
     service.hide_asset(workspace["workspace_id"], beat["id"], first["asset_id"])
@@ -282,8 +283,8 @@ def test_sfx_recommendation_selection_reuse_and_edit_handoff(
     result = service.build_edit_folder(workspace["workspace_id"])
     sfx_entries = [row for row in result["entries"] if row["media_role"] == "sfx"]
     assert len(sfx_entries) == 2
-    assert len(list((catalog_settings.root / "Projects/sfx-story/Edit/SFX").iterdir())) == 2
-    with (catalog_settings.root / "Projects/sfx-story/Edit/manifest.csv").open(
+    assert len(list((catalog_settings.root / "Projects/Unassigned/sfx-story/Edit/SFX").iterdir())) == 2
+    with (catalog_settings.root / "Projects/Unassigned/sfx-story/Edit/manifest.csv").open(
         encoding="utf-8-sig", newline=""
     ) as handle:
         assert [row["media_role"] for row in csv.DictReader(handle)] == ["sfx", "sfx"]
@@ -904,13 +905,138 @@ def test_workspace_organization_release_order_and_safe_delete(catalog_settings: 
         service.delete_release(release["id"])
     service.assign_workspace_release(first["workspace_id"], None)
     assert service.get_workspace(first["workspace_id"], include_candidates=False)["release"] is None
-    project = catalog_settings.root / "Projects" / first["story_id"]
+    project = catalog_settings.root / "Projects" / "Unassigned" / first["story_id"]
     project.mkdir(parents=True, exist_ok=True)
     (project / "generated.txt").write_text("workspace only", encoding="utf-8")
     service.delete_workspace(first["workspace_id"])
     assert not project.exists()
     assert all(item["workspace_id"] != first["workspace_id"] for item in service.list_workspaces())
     assert service.get_release(release["id"])["name"] == release["name"]
+    engine.dispose()
+
+
+def test_phase9b_moves_single_workspace_between_canonical_story_roots(
+    catalog_settings: Settings,
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    workspace_id = imported["workspace_id"]
+    story_id = imported["story_id"]
+    legacy = catalog_settings.projects_root / story_id
+    legacy.mkdir(parents=True)
+    (legacy / "history.txt").write_text("preserve me", encoding="utf-8")
+    first = service.create_release("Storage release one")
+    second = service.create_release("Storage release two")
+
+    service.assign_workspace_release(workspace_id, first["id"])
+    first_root = catalog_settings.releases_root / first["id"] / "Stories" / story_id
+    assert first_root.joinpath("history.txt").read_text(encoding="utf-8") == "preserve me"
+    assert not legacy.exists()
+
+    service.assign_workspace_release(workspace_id, second["id"])
+    second_root = catalog_settings.releases_root / second["id"] / "Stories" / story_id
+    assert second_root.joinpath("history.txt").is_file()
+    assert not first_root.exists()
+
+    service.assign_workspace_release(workspace_id, None)
+    unassigned = catalog_settings.projects_root / "Unassigned" / story_id
+    assert unassigned.joinpath("history.txt").is_file()
+    assert not second_root.exists()
+
+    service.assign_workspace_release(workspace_id, first["id"])
+    service.update_release_metadata(first["id"], status="released", release_date=None)
+    with pytest.raises(ProducerWorkflowError, match="cannot be unassigned"):
+        service.assign_workspace_release(workspace_id, None)
+    assert first_root.joinpath("history.txt").is_file()
+    engine.dispose()
+
+
+def test_phase9b_move_failure_keeps_assignment_and_workspace_in_place(
+    catalog_settings: Settings, monkeypatch
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    workspace_id = imported["workspace_id"]
+    source = catalog_settings.projects_root / "Unassigned" / imported["story_id"]
+    source.mkdir(parents=True)
+    (source / "keep.txt").write_text("keep", encoding="utf-8")
+    release = service.create_release("Storage move failure")
+
+    def fail_move(_source, _destination):
+        raise OSError("locked")
+
+    monkeypatch.setattr(producer_service_module.shutil, "move", fail_move)
+    with pytest.raises(ProducerWorkflowError, match="could not be moved"):
+        service.assign_workspace_release(workspace_id, release["id"])
+    assert source.joinpath("keep.txt").is_file()
+    assert service.get_workspace(workspace_id, include_candidates=False)["release"] is None
+    engine.dispose()
+
+
+def test_phase9b_database_failure_restores_moved_workspace(
+    catalog_settings: Settings, monkeypatch
+) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    workspace_id = imported["workspace_id"]
+    source = catalog_settings.projects_root / "Unassigned" / imported["story_id"]
+    source.mkdir(parents=True)
+    (source / "keep.txt").write_text("keep", encoding="utf-8")
+    release = service.create_release("Storage commit rollback")
+
+    def fail_commit(_session):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(producer_service_module.Session, "commit", fail_commit)
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        service.assign_workspace_release(workspace_id, release["id"])
+    target = catalog_settings.releases_root / release["id"] / "Stories" / imported["story_id"]
+    assert source.joinpath("keep.txt").is_file()
+    assert not target.exists()
+    engine.dispose()
+
+
+def test_phase9b_audio_release_artifacts_and_transcript(catalog_settings: Settings) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    first_id = imported["workspace_id"]
+    second_data = _plan().model_dump(mode="json")
+    second_data["story"] = {"story_id": "transcript-second", "title": "Transcript Second"}
+    second_data["beats"][0]["beat_id"] = "transcript-001"
+    second_data["beats"][1]["beat_id"] = "transcript-002"
+    second = service.import_plan(VisualPlan.model_validate(second_data))
+    release = service.create_release("Transcript release")
+    service.assign_workspace_release(first_id, release["id"])
+    service.assign_workspace_release(second["workspace_id"], release["id"])
+    temp = catalog_settings.temp_root
+    audio = temp / "narration.mp3"
+    audio.write_bytes(b"not-a-decoded-audio-file")
+    audio_version = service.upload_story_document(first_id, "narration_audio", audio, audio.name)
+    audio_path, audio_view = service.story_document_path(first_id, audio_version["id"])
+    assert audio_path.suffix == ".mp3" and audio_view["mime_type"] == "audio/mpeg"
+    with pytest.raises(ProducerWorkflowError, match="deprecated"):
+        service.upload_story_document(first_id, "narration_script", audio, "legacy.txt")
+
+    first_subtitles = temp / "first-subtitles.txt"
+    second_subtitles = temp / "second-subtitles.txt"
+    first_subtitles.write_text("First spoken line\n", encoding="utf-8")
+    second_subtitles.write_bytes(b"\xef\xbb\xbfSecond spoken line\n")
+    service.upload_story_document(first_id, "subtitles", first_subtitles, first_subtitles.name)
+    service.upload_story_document(second["workspace_id"], "subtitles", second_subtitles, second_subtitles.name)
+    transcript = service.generate_release_transcript(release["id"])
+    assert transcript == catalog_settings.releases_root / release["id"] / "Captions" / f"{release['id']}_YouTube_Transcript.txt"
+    assert transcript.read_bytes() == b"First spoken line\n\nSecond spoken line\n"
+
+    project = temp / "episode.drp"
+    project.write_bytes(b"DaVinci project")
+    artifact = service.upload_release_artifact(release["id"], "resolve_project", project, project.name)
+    artifact_path, _ = service.release_artifact_path(release["id"], artifact["id"])
+    assert artifact_path.parent == catalog_settings.releases_root / release["id"] / "DaVinci"
+    engine.dispose()
+
+
+def test_phase9b_transcript_requires_valid_subtitles(catalog_settings: Settings) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    release = service.create_release("Incomplete transcript")
+    service.assign_workspace_release(imported["workspace_id"], release["id"])
+    with pytest.raises(ProducerWorkflowError, match="missing a Subtitle TXT"):
+        service.generate_release_transcript(release["id"])
     engine.dispose()
 
 
@@ -980,7 +1106,7 @@ def test_delete_one_of_four_workspaces_preserves_other_beats_and_shared_media(
         session.commit()
     first_workspace = service.get_workspace(imported[0]["workspace_id"], include_candidates=False)
     service.select_asset(first_workspace["workspace_id"], first_workspace["beats"][0]["id"], shared["asset_id"])
-    project = catalog_settings.root / "Projects" / test_workspace["story_id"]
+    project = catalog_settings.root / "Projects" / "Unassigned" / test_workspace["story_id"]
     project.mkdir(parents=True, exist_ok=True)
     (project / "generated.txt").write_text("test workspace only", encoding="utf-8")
 
@@ -1337,7 +1463,7 @@ def test_edit_plan_import_choices_review_invalidation_and_handoff(
 
     result = service.import_edit_plan(workspace["workspace_id"], _edit_plan())
     assert result["beats"] == 2
-    generated_handoff = catalog_settings.root / "Projects/producer-story/Edit/edit_plan.json"
+    generated_handoff = catalog_settings.root / "Projects/Unassigned/producer-story/Edit/edit_plan.json"
     assert generated_handoff.is_file()
     detail = service.get_workspace(workspace["workspace_id"], include_candidates=False)
     first_guidance = detail["beats"][0]["edit_guidance"]
@@ -1434,17 +1560,29 @@ def test_story_documents_are_versioned_outside_media_catalog_and_deleted_with_wo
     temp = catalog_settings.root / "Temp"
     script_pdf = temp / "script-one.pdf"
     script_pdf.write_bytes(b"%PDF-1.4\nfirst script")
-    first = service.upload_story_document(
-        workspace_id, "narration_script", script_pdf, "Original Script.pdf"
-    )
-    script_docx = temp / "script-two.docx"
-    second_content = _docx(script_docx, "replacement")
+    documents_root = catalog_settings.root / "Projects/Unassigned/producer-story/Documents"
+    documents_root.mkdir(parents=True, exist_ok=True)
+    historical_name = "narration_script-v0001-original-script.pdf"
+    historical_path = documents_root / historical_name
+    historical_path.write_bytes(script_pdf.read_bytes())
+    with Session(engine) as session:
+        session.add(StoryDocumentVersion(
+            id="historical-script", workspace_id=workspace_id, document_type="narration_script",
+            version=1, original_filename="Original Script.pdf", stored_filename=historical_name,
+            sha256=hashlib.sha256(historical_path.read_bytes()).hexdigest(), mime_type="application/pdf",
+            file_size_bytes=historical_path.stat().st_size, uploaded_at=datetime.now(timezone.utc),
+        ))
+        session.commit()
+    first = {"id": "historical-script", "version": 1}
+    script_docx = temp / "script-two.pdf"
+    second_content = b"%PDF-1.7\nreplacement narrator copy"
+    script_docx.write_bytes(second_content)
     second = service.upload_story_document(
-        workspace_id, "narration_script", script_docx, "Revised Script.docx"
+        workspace_id, "narrator_copy", script_docx, "Revised Narrator Copy.pdf"
     )
     narrator = temp / "narrator.pdf"
     narrator.write_bytes(b"%PDF-1.7\nnarrator copy")
-    service.upload_story_document(
+    narrator_version = service.upload_story_document(
         workspace_id, "narrator_copy", narrator, "Narrator Final.pdf"
     )
     subtitles = temp / "subtitles.txt"
@@ -1456,15 +1594,19 @@ def test_story_documents_are_versioned_outside_media_catalog_and_deleted_with_wo
     notes.write_bytes(b"{\\rtf1 Production notes}")
     service.upload_story_document(workspace_id, "other", notes, "Notes.rtf")
 
-    assert first["version"] == 1 and second["version"] == 2
+    assert first["version"] == 1 and second["version"] == 1 and narrator_version["version"] == 2
     detail = service.get_workspace(workspace_id, include_candidates=False)
     script_group = next(
         item for item in detail["documents"] if item["document_type"] == "narration_script"
     )
-    assert script_group["current"]["id"] == second["id"]
-    assert [item["version"] for item in script_group["versions"]] == [2, 1]
-    assert script_group["versions"][1]["original_filename"] == "Original Script.pdf"
-    documents_root = catalog_settings.root / "Projects/producer-story/Documents"
+    assert script_group["current"]["id"] == first["id"]
+    assert [item["version"] for item in script_group["versions"]] == [1]
+    narrator_group = next(
+        item for item in detail["documents"] if item["document_type"] == "narrator_copy"
+    )
+    assert narrator_group["current"]["id"] == narrator_version["id"]
+    assert [item["version"] for item in narrator_group["versions"]] == [2, 1]
+    assert narrator_group["versions"][1]["original_filename"] == "Revised Narrator Copy.pdf"
     stored = sorted(documents_root.iterdir())
     assert len(stored) == 5
     assert any(path.read_bytes() == b"%PDF-1.4\nfirst script" for path in stored)
@@ -1485,7 +1627,7 @@ def test_story_documents_are_versioned_outside_media_catalog_and_deleted_with_wo
                 )
             )
         )
-        assert event_types.count("workspace.document_uploaded") == 4
+        assert event_types.count("workspace.document_uploaded") == 3
         assert event_types.count("workspace.document_replaced") == 1
 
     service.delete_workspace(workspace_id)
@@ -1504,7 +1646,7 @@ def test_story_document_validation_and_trusted_paths(
     temp = catalog_settings.root / "Temp"
     invalid_pdf = temp / "invalid.pdf"
     invalid_pdf.write_bytes(b"not a pdf")
-    with pytest.raises(ProducerWorkflowError, match="valid PDF"):
+    with pytest.raises(ProducerWorkflowError, match="deprecated"):
         service.upload_story_document(
             workspace_id, "narration_script", invalid_pdf, "invalid.pdf"
         )

@@ -742,7 +742,7 @@ class StoryDocumentVersion(Base):
     __tablename__ = "story_document_versions"
     __table_args__ = (
         CheckConstraint(
-            "document_type IN ('narration_script', 'narrator_copy', 'subtitles', 'other')",
+            "document_type IN ('narration_script', 'narrator_copy', 'subtitles', 'narration_audio', 'other')",
             name="document_type",
         ),
         CheckConstraint("version > 0", name="version_positive"),

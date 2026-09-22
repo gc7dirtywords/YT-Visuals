@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import html
+import io
 import ipaddress
 import json
 import mimetypes
@@ -75,23 +76,28 @@ RELEASE_WORKSPACE_STATUS = {
     "released": "completed",
 }
 _PRESENTATION_UNSET = object()
-DOCUMENT_TYPES = ("narration_script", "narrator_copy", "subtitles", "other")
+DOCUMENT_TYPES = ("narration_script", "narrator_copy", "subtitles", "narration_audio", "other")
 DOCUMENT_TYPE_LABELS = {
     "narration_script": "Narration Script",
     "narrator_copy": "Narrator Copy",
     "subtitles": "Subtitles",
+    "narration_audio": "Narration Audio",
     "other": "Other",
 }
 DOCUMENT_EXTENSIONS = {
     "narration_script": frozenset({".pdf", ".docx", ".txt"}),
     "narrator_copy": frozenset({".pdf"}),
     "subtitles": frozenset({".txt"}),
+    "narration_audio": frozenset({".wav", ".mp3", ".flac"}),
     "other": frozenset({".pdf", ".docx", ".txt", ".rtf", ".odt", ".csv", ".md"}),
 }
 DOCUMENT_MIME_TYPES = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".txt": "text/plain; charset=utf-8",
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
     ".rtf": "application/rtf",
     ".odt": "application/vnd.oasis.opendocument.text",
     ".csv": "text/csv; charset=utf-8",
@@ -101,6 +107,11 @@ RELEASE_ARTIFACT_EXTENSIONS = {
     "resolve_project": frozenset({".drp", ".zip"}),
     "final_render": frozenset({".mp4", ".mov"}),
     "other": frozenset({".pdf", ".txt", ".md", ".zip"}),
+}
+RELEASE_ARTIFACT_FOLDERS = {
+    "resolve_project": "DaVinci",
+    "final_render": "Final",
+    "other": "Other",
 }
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 
@@ -442,7 +453,8 @@ class ProducerWorkflowService:
             history_page = self._event_page(
                 session, "workspace", workspace.id, offset=history_offset
             )
-            edit_folder = self.edit_folder(workspace.story_external_id)
+            workspace_folder = self._workspace_folder_for(workspace)
+            edit_folder = workspace_folder / "Edit"
             result = {
                 "workspace_id": workspace.id,
                 "story_id": workspace.story_external_id,
@@ -457,7 +469,7 @@ class ProducerWorkflowService:
                     "manifest_exists": (edit_folder / "manifest.csv").is_file(),
                     "edit_plan_exists": (edit_folder / "edit_plan.json").is_file(),
                 },
-                "storyboard": self._storyboard_view(workspace.story_external_id),
+                "storyboard": self._storyboard_view(workspace_folder),
                 "edit_plan": {
                     "imported": workspace.edit_plan_json is not None,
                     "document_sha256": workspace.edit_plan_document_sha256,
@@ -592,6 +604,8 @@ class ProducerWorkflowService:
     ) -> dict[str, Any]:
         if document_type not in DOCUMENT_TYPES:
             raise ProducerWorkflowError("unsupported story document type")
+        if document_type == "narration_script":
+            raise ProducerWorkflowError("new Narration Script uploads are deprecated; use Narrator Copy")
         clean_filename = _clean_document_filename(original_filename)
         extension = Path(clean_filename).suffix.casefold()
         if extension not in DOCUMENT_EXTENSIONS[document_type]:
@@ -634,7 +648,7 @@ class ProducerWorkflowService:
             stored_filename = (
                 f"{document_type}-v{version:04d}-{label}-{digest[:12]}{extension}"
             )
-            documents_root = self.story_documents_folder(workspace.story_external_id)
+            documents_root = self._workspace_folder_for(workspace) / "Documents"
             destination = documents_root / stored_filename
             _assert_within(destination, documents_root)
             documents_root.mkdir(parents=True, exist_ok=True)
@@ -682,11 +696,77 @@ class ProducerWorkflowService:
                 raise
             return after
 
-    def story_documents_folder(self, story_id: str) -> Path:
-        projects_root = self.settings.projects_root
-        path = projects_root / story_id / "Documents"
-        _assert_within(path, projects_root)
+    def _canonical_workspace_folder(
+        self, story_id: str, video_release_id: str | None
+    ) -> Path:
+        if video_release_id:
+            root = self.settings.releases_root / video_release_id / "Stories"
+        else:
+            root = self.settings.projects_root / "Unassigned"
+        path = root / story_id
+        _assert_within(path, root)
         return path
+
+    def _legacy_workspace_folder(self, story_id: str) -> Path:
+        path = self.settings.projects_root / story_id
+        _assert_within(path, self.settings.projects_root)
+        return path
+
+    def _workspace_folder_for(self, workspace: ProducerWorkspace) -> Path:
+        """Resolve one authoritative workspace, retaining legacy data until explicitly moved."""
+        canonical = self._canonical_workspace_folder(
+            workspace.story_external_id, workspace.video_release_id
+        )
+        legacy = self._legacy_workspace_folder(workspace.story_external_id)
+        if canonical.exists() and legacy.exists():
+            raise ProducerWorkflowError(
+                "workspace storage has both canonical and legacy locations; audit before moving"
+            )
+        return canonical if canonical.exists() or not legacy.exists() else legacy
+
+    def workspace_folder(self, workspace_id: str) -> Path:
+        with Session(self.engine) as session:
+            workspace = session.get(ProducerWorkspace, workspace_id)
+            if workspace is None:
+                raise ProducerWorkflowError("producer workspace was not found")
+            return self._workspace_folder_for(workspace)
+
+    def _move_workspace_folder(
+        self, workspace: ProducerWorkspace, destination_release_id: str | None
+    ) -> Callable[[], None]:
+        source = self._workspace_folder_for(workspace)
+        destination = self._canonical_workspace_folder(
+            workspace.story_external_id, destination_release_id
+        )
+        if source == destination:
+            return lambda: None
+        if destination.exists():
+            raise ProducerWorkflowError(
+                "destination workspace already exists; audit storage before reassignment"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        created = not source.exists()
+        try:
+            if created:
+                destination.mkdir()
+            else:
+                shutil.move(str(source), str(destination))
+        except OSError as exc:
+            raise ProducerWorkflowError("workspace files could not be moved; assignment was kept") from exc
+
+        def rollback() -> None:
+            if not destination.exists():
+                return
+            if created:
+                destination.rmdir()
+            else:
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(destination), str(source))
+        return rollback
+
+    def story_documents_folder(self, story_id: str) -> Path:
+        """Compatibility path for an unassigned story; workspace operations resolve by ID."""
+        return self._canonical_workspace_folder(story_id, None) / "Documents"
 
     def story_document_path(
         self, workspace_id: str, document_id: str
@@ -704,9 +784,7 @@ class ProducerWorkflowService:
                 raise ProducerWorkflowError("story document version was not found")
             if Path(document.stored_filename).name != document.stored_filename:
                 raise ProducerWorkflowError("stored story document path is unsafe")
-            documents_root = self.story_documents_folder(
-                document.workspace.story_external_id
-            )
+            documents_root = self._workspace_folder_for(document.workspace) / "Documents"
             path = documents_root / document.stored_filename
             _assert_within(path, documents_root)
             view = self._document_view(document)
@@ -950,10 +1028,63 @@ class ProducerWorkflowService:
     def _artifact_view(item: ReleaseProductionArtifactVersion) -> dict[str, Any]:
         return {"id": item.id, "artifact_type": item.artifact_type, "version": item.version, "original_filename": item.original_filename, "stored_filename": item.stored_filename, "sha256": item.sha256, "mime_type": item.mime_type, "file_size_bytes": item.file_size_bytes, "technical_metadata": item.technical_metadata or {}, "uploaded_at": item.uploaded_at.isoformat()}
 
-    def release_artifacts_folder(self, release_id: str) -> Path:
+    def release_artifacts_folder(self, release_id: str, artifact_type: str | None = None) -> Path:
         path = self.settings.releases_root / release_id
         _assert_within(path, self.settings.releases_root)
+        if artifact_type is not None:
+            path = path / RELEASE_ARTIFACT_FOLDERS[artifact_type]
+            _assert_within(path, self.settings.releases_root / release_id)
         return path
+
+    def story_files_root(self, workspace_id: str) -> Path:
+        self.get_workspace(workspace_id, include_candidates=False)
+        return self.workspace_folder(workspace_id)
+
+    def release_files_root(self, release_id: str) -> Path:
+        self.get_release(release_id)
+        return self.release_artifacts_folder(release_id)
+
+    @staticmethod
+    def browser_files(root: Path) -> list[dict[str, Any]]:
+        if not root.exists():
+            return []
+        files: list[dict[str, Any]] = []
+        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                path.resolve().relative_to(root.resolve())
+                size = path.stat().st_size
+            except (OSError, ValueError):
+                continue
+            relative_path = path.relative_to(root).as_posix()
+            files.append({
+                "path": relative_path,
+                "name": path.name,
+                "size": size,
+                "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            })
+        return files
+
+    @staticmethod
+    def browser_file_path(root: Path, relative_path: str) -> Path:
+        if not relative_path or Path(relative_path).is_absolute():
+            raise ProducerWorkflowError("requested file path is invalid")
+        path = root / Path(relative_path)
+        _assert_within(path, root)
+        if not path.is_file() or path.is_symlink():
+            raise ProducerWorkflowError("requested file was not found")
+        return path
+
+    @classmethod
+    def browser_zip(cls, root: Path) -> io.BytesIO:
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for item in cls.browser_files(root):
+                path = cls.browser_file_path(root, item["path"])
+                archive.write(path, arcname=item["path"])
+        payload.seek(0)
+        return payload
 
     def upload_release_artifact(self, release_id: str, artifact_type: str, source_path: Path, original_filename: str) -> dict[str, Any]:
         if artifact_type not in RELEASE_ARTIFACT_EXTENSIONS:
@@ -984,7 +1115,7 @@ class ProducerWorkflowService:
             previous = self._artifact_view(max(existing, key=lambda item: item.version)) if existing else None
             version = max((item.version for item in existing), default=0) + 1
             stored = f"{artifact_type}-v{version:04d}-{_safe_label(Path(filename).stem, fallback='artifact')[:72]}-{digest[:12]}{extension}"
-            root = self.release_artifacts_folder(release.id); root.mkdir(parents=True, exist_ok=True)
+            root = self.release_artifacts_folder(release.id, artifact_type); root.mkdir(parents=True, exist_ok=True)
             destination = root / stored; _assert_within(destination, root)
             try:
                 with source_path.open("rb") as source, destination.open("xb") as target:
@@ -1006,9 +1137,62 @@ class ProducerWorkflowService:
             artifact = session.scalar(select(ReleaseProductionArtifactVersion).where(ReleaseProductionArtifactVersion.id == artifact_id, ReleaseProductionArtifactVersion.video_release_id == release_id))
             if artifact is None: raise ProducerWorkflowError("release artifact version was not found")
             if Path(artifact.stored_filename).name != artifact.stored_filename: raise ProducerWorkflowError("stored release artifact path is unsafe")
-            root = self.release_artifacts_folder(release_id); path = root / artifact.stored_filename; _assert_within(path, root); view = self._artifact_view(artifact)
+            root = self.release_artifacts_folder(release_id, artifact.artifact_type)
+            path = root / artifact.stored_filename
+            if not path.is_file():
+                # Historical artifacts remain at the pre-9B release root until audited.
+                root = self.release_artifacts_folder(release_id)
+                path = root / artifact.stored_filename
+            _assert_within(path, root); view = self._artifact_view(artifact)
         if not path.is_file(): raise ProducerWorkflowError("stored release artifact file is missing")
         return path, view
+
+    def generate_release_transcript(self, release_id: str) -> Path:
+        with Session(self.engine) as session:
+            release = session.scalar(
+                select(VideoRelease).where(VideoRelease.id == release_id).options(
+                    selectinload(VideoRelease.workspaces).selectinload(
+                        ProducerWorkspace.document_versions
+                    )
+                )
+            )
+            if release is None:
+                raise ProducerWorkflowError("video release was not found")
+            stories = sorted(
+                release.workspaces, key=lambda item: (item.release_position or 0, item.created_at)
+            )
+            if not stories:
+                raise ProducerWorkflowError("assign at least one story before generating a transcript")
+            subtitle_paths: list[Path] = []
+            for workspace in stories:
+                versions = [item for item in workspace.document_versions if item.document_type == "subtitles"]
+                if not versions:
+                    raise ProducerWorkflowError(f"story {workspace.story_external_id} is missing a Subtitle TXT")
+                current = max(versions, key=lambda item: item.version)
+                subtitle_paths.append(self._workspace_folder_for(workspace) / "Documents" / current.stored_filename)
+        parts: list[str] = []
+        for path in subtitle_paths:
+            try:
+                spoken = path.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ProducerWorkflowError("Subtitle TXT must be readable UTF-8") from exc
+            if not spoken.strip():
+                raise ProducerWorkflowError("Subtitle TXT must not be empty")
+            if re.search(r"(?im)^\s*(#{1,6}\s|narrator\s*copy\s*:|voiceover\s*:|script\s*:)", spoken):
+                raise ProducerWorkflowError("Subtitle TXT contains obvious narrator markup")
+            parts.append(spoken.strip())
+        captions = self.release_artifacts_folder(release_id) / "Captions"
+        captions.mkdir(parents=True, exist_ok=True)
+        destination = captions / f"{release_id}_YouTube_Transcript.txt"
+        _assert_within(destination, captions)
+        temporary = captions / f".{destination.name}.{uuid.uuid4()}.tmp"
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write("\n\n".join(parts) + "\n")
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination
 
     @staticmethod
     def _presentation_view(revision: ReleasePresentationRevision) -> dict[str, Any]:
@@ -1260,6 +1444,7 @@ class ProducerWorkflowService:
         with Session(self.engine) as session:
             workspace = session.get(ProducerWorkspace, workspace_id)
             if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
+            rollback_move: Callable[[], None] = lambda: None
             if workspace.archived_at is not None:
                 raise ProducerWorkflowError("restore an archived workspace before assigning it")
             if not release_id:
@@ -1268,6 +1453,7 @@ class ProducerWorkflowService:
                     if current_release and current_release.status == "released":
                         raise ProducerWorkflowError("stories assigned to a released video release cannot be unassigned")
                     old_release_id = workspace.video_release_id
+                    rollback_move = self._move_workspace_folder(workspace, None)
                     before = {
                         "video_release_id": old_release_id,
                         "release_position": workspace.release_position,
@@ -1286,7 +1472,11 @@ class ProducerWorkflowService:
                         after={"workspace_id": workspace.id, "video_release_id": None, "release_position": None},
                         related_subject_type="workspace", related_subject_id=workspace.id,
                     )
-                session.commit()
+                try:
+                    session.commit()
+                except Exception:
+                    rollback_move()
+                    raise
                 return
             release = session.get(VideoRelease, release_id)
             if release is None: raise ProducerWorkflowError("video release was not found")
@@ -1299,6 +1489,7 @@ class ProducerWorkflowService:
                     if old_release and old_release.status == "released":
                         raise ProducerWorkflowError("stories assigned to a released video release cannot be reassigned")
                 old_position = workspace.release_position
+                rollback_move = self._move_workspace_folder(workspace, release_id)
                 if old_release_id:
                     self._record_event(
                         session, "release", old_release_id, "release.workspace_unassigned",
@@ -1332,7 +1523,11 @@ class ProducerWorkflowService:
                     related_subject_type="release", related_subject_id=release.id,
                     source="release_assignment_sync",
                 )
-            session.commit()
+            try:
+                session.commit()
+            except Exception:
+                rollback_move()
+                raise
 
     def move_workspace_release_position(self, workspace_id: str, direction: int) -> None:
         with Session(self.engine) as session:
@@ -1375,9 +1570,7 @@ class ProducerWorkflowService:
                     raise ProducerWorkflowError("stories assigned to a released video release cannot be deleted")
                 raise ProducerWorkflowError("unassign the workspace from its video release before deleting it")
             story_id = workspace.story_external_id
-        projects_root = (self.settings.root / "Projects").resolve()
-        target = (projects_root / story_id).resolve()
-        if target == projects_root or projects_root not in target.parents: raise ProducerWorkflowError("workspace project path is unsafe")
+            target = self._workspace_folder_for(workspace)
         staged = self.settings.temp_root / "producer-delete-staging" / f"{workspace_id}-{uuid.uuid4()}"
         try:
             if target.exists():
@@ -2160,7 +2353,7 @@ class ProducerWorkflowService:
         copier: Callable[[str | os.PathLike[str], str | os.PathLike[str]], Any] = shutil.copy2,
     ) -> dict[str, Any]:
         workspace = self.get_workspace(workspace_id, include_candidates=False)
-        edit_root = self.edit_folder(workspace["story_id"])
+        edit_root = self.workspace_folder(workspace_id) / "Edit"
         staging = self.settings.root / "Temp" / f"edit-build-{uuid.uuid4()}"
         staging_visuals = staging / "Visuals"
         staging_sfx = staging / "SFX"
@@ -2343,14 +2536,13 @@ class ProducerWorkflowService:
 
     def generate_storyboard(self, workspace_id: str) -> dict[str, Any]:
         workspace = self.get_workspace(workspace_id, include_candidates=False)
-        destination = self.edit_folder(workspace["story_id"]) / "storyboard.pdf"
+        destination = self.workspace_folder(workspace_id) / "Edit" / "storyboard.pdf"
         pages = render_producer_storyboard(workspace, destination, root=self.settings.root)
         return {"storyboard_path": str(destination), "pages": pages}
 
     def storyboard_path(self, workspace_id: str) -> Path:
         workspace = self.get_workspace(workspace_id, include_candidates=False)
-        path = self.edit_folder(workspace["story_id"]) / "storyboard.pdf"
-        _assert_within(path, self.settings.root / "Projects")
+        path = self.workspace_folder(workspace_id) / "Edit" / "storyboard.pdf"
         if not path.is_file():
             raise ProducerWorkflowError("generate the storyboard before opening it")
         return path
@@ -2359,8 +2551,7 @@ class ProducerWorkflowService:
         if filename not in {"manifest.csv", "edit_plan.json", "storyboard.pdf"}:
             raise ProducerWorkflowError("requested handoff artifact is not available")
         workspace = self.get_workspace(workspace_id, include_candidates=False)
-        path = self.edit_folder(workspace["story_id"]) / filename
-        _assert_within(path, self.settings.projects_root)
+        path = self.workspace_folder(workspace_id) / "Edit" / filename
         if not path.is_file():
             raise ProducerWorkflowError("requested handoff artifact has not been generated")
         return path
@@ -2380,13 +2571,14 @@ class ProducerWorkflowService:
         return str(path)
 
     def edit_folder(self, story_id: str) -> Path:
-        return self.settings.projects_root / story_id / "Edit"
+        """Legacy compatibility helper; new workspace operations use workspace_folder()."""
+        return self.settings.projects_root / "Unassigned" / story_id / "Edit"
 
     def open_edit_folder(
         self, workspace_id: str, *, opener: Callable[[str], Any] | None = None
     ) -> str:
         workspace = self.get_workspace(workspace_id, include_candidates=False)
-        path = self.edit_folder(workspace["story_id"])
+        path = self.workspace_folder(workspace_id) / "Edit"
         path.mkdir(parents=True, exist_ok=True)
         if opener is not None:
             opener(str(path))
@@ -2523,8 +2715,8 @@ class ProducerWorkflowService:
             },
         }
 
-    def _storyboard_view(self, story_id: str) -> dict[str, Any]:
-        path = self.edit_folder(story_id) / "storyboard.pdf"
+    def _storyboard_view(self, workspace_folder: Path) -> dict[str, Any]:
+        path = workspace_folder / "Edit" / "storyboard.pdf"
         return {
             "exists": path.is_file(),
             "path": str(path),
@@ -2715,6 +2907,8 @@ def _clean_document_filename(value: str) -> str:
 
 def _validate_document_content(path: Path, extension: str) -> None:
     try:
+        if extension in {".wav", ".mp3", ".flac"}:
+            return
         if extension == ".pdf":
             with path.open("rb") as handle:
                 signature = handle.read(5)

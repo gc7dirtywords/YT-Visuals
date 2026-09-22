@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · YT-ChannelOps{% endblock %}
+{% block content %}
+  <nav class="breadcrumbs"><a href="{{ url_for('index') }}">← Dashboard</a></nav>
+  <section class="compact-page-header files-header">
+    <div><p class="eyebrow">{{ scope_label }} Files</p><h1>{{ subject_name }}</h1><p>Browser access to the server-side production files.</p></div>
+    <a class="button-link" href="{{ zip_url }}">Download Folder as ZIP</a>
+  </section>
+  <section class="surface-panel files-panel">
+    <div class="section-heading"><h2>Files</h2><span class="section-meta">{{ files|length }} file{{ '' if files|length == 1 else 's' }}</span></div>
+    {% if files %}
+      <div class="file-list">
+        {% for item in files %}
+          <div class="file-row"><div><strong>{{ item.name }}</strong><small>{{ item.path }} · {{ item.size }} bytes</small></div><div class="inline-actions"><a class="button-link" href="{{ item.view_url }}" target="_blank">{{ 'Play' if item.mime_type.startswith(('audio/', 'video/')) else 'View' }}</a><a class="button-link" href="{{ item.download_url }}">Download</a></div></div>
+        {% endfor %}
+      </div>
+    {% else %}<p class="empty-state">No files are currently stored here.</p>{% endif %}
+  </section>
+{% endblock %}
