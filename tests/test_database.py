@@ -37,7 +37,8 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         "media_sources",
         "projects",
         "producer_beat_hidden_assets",
-        "producer_beats",
+            "producer_beats",
+            "producer_visual_plan_revisions",
         "producer_workspaces",
         "production_events",
             "release_presentation_revisions",
@@ -60,7 +61,7 @@ def test_database_is_created_and_migrated(catalog_settings: Settings) -> None:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         status = get_migration_status(catalog_settings, connection)
         assert status.is_current
-        assert status.current_revision == "0013_release_production_artifacts"
+        assert status.current_revision == "0014_phase9a_story_lifecycle"
 
     engine.dispose()
 

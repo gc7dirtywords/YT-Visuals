@@ -704,6 +704,8 @@ class ProducerWorkspace(TimestampMixin, Base):
     edit_plan_document_sha256: Mapped[str | None] = mapped_column(String(64))
     edit_plan_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     edit_plan_imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_plan_revision_id: Mapped[str | None] = mapped_column(String(36))
 
     beats: Mapped[list["ProducerBeat"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan", order_by="ProducerBeat.sequence"
@@ -714,6 +716,26 @@ class ProducerWorkspace(TimestampMixin, Base):
         order_by="StoryDocumentVersion.version",
     )
     video_release: Mapped["VideoRelease | None"] = relationship(back_populates="workspaces")
+    plan_revisions: Mapped[list["ProducerVisualPlanRevision"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan", order_by="ProducerVisualPlanRevision.revision"
+    )
+
+
+class ProducerVisualPlanRevision(Base):
+    __tablename__ = "producer_visual_plan_revisions"
+    __table_args__ = (
+        CheckConstraint("revision > 0", name="ck_producer_plan_revision_positive"),
+        CheckConstraint("length(source_sha256) = 64", name="ck_producer_plan_revision_sha256_length"),
+        UniqueConstraint("workspace_id", "revision", name="uq_producer_plan_revision_workspace_revision"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("producer_workspaces.id", ondelete="CASCADE"), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    original_plan_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.current_timestamp())
+    change_note: Mapped[str | None] = mapped_column(Text)
+    workspace: Mapped[ProducerWorkspace] = relationship(back_populates="plan_revisions")
 
 
 class StoryDocumentVersion(Base):
@@ -903,7 +925,6 @@ class ProducerBeat(TimestampMixin, Base):
             name="selected_sha256_length",
         ),
         UniqueConstraint("workspace_id", "external_beat_id", name="uq_producer_beats_workspace_external"),
-        UniqueConstraint("workspace_id", "sequence", name="uq_producer_beats_workspace_sequence"),
         Index("ix_producer_beats_workspace_sequence", "workspace_id", "sequence"),
         Index("ix_producer_beats_selected_sfx_asset_id", "selected_sfx_asset_id"),
     )
@@ -936,6 +957,8 @@ class ProducerBeat(TimestampMixin, Base):
     edit_guidance_needs_review: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("0")
     )
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    plan_needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("0"))
 
     workspace: Mapped[ProducerWorkspace] = relationship(back_populates="beats")
     selected_asset: Mapped[MediaAsset | None] = relationship(

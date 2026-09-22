@@ -907,11 +907,42 @@ def test_workspace_organization_release_order_and_safe_delete(catalog_settings: 
     project = catalog_settings.root / "Projects" / first["story_id"]
     project.mkdir(parents=True, exist_ok=True)
     (project / "generated.txt").write_text("workspace only", encoding="utf-8")
-    with pytest.raises(ProducerWorkflowError, match="assignment history"):
-        service.delete_workspace(first["workspace_id"])
-    assert project.exists()
-    assert any(item["workspace_id"] == first["workspace_id"] for item in service.list_workspaces())
+    service.delete_workspace(first["workspace_id"])
+    assert not project.exists()
+    assert all(item["workspace_id"] != first["workspace_id"] for item in service.list_workspaces())
     assert service.get_release(release["id"])["name"] == release["name"]
+    engine.dispose()
+
+
+def test_phase9a_plan_revision_archive_and_released_locks(catalog_settings: Settings) -> None:
+    engine, service, imported = _setup(catalog_settings)
+    workspace_id = imported["workspace_id"]
+    revised_data = _plan().model_dump(mode="json")
+    revised_data["beats"] = list(reversed(revised_data["beats"]))
+    revised_data["beats"][0]["sequence"] = 1
+    revised_data["beats"][1]["sequence"] = 2
+    revised_data["beats"][0]["desired_visual"] = "materially revised visual"
+    revised = VisualPlan.model_validate(revised_data)
+    preview = service.import_plan(revised)
+    assert preview["requires_confirmation"] is True
+    assert preview["diff"]["material"]
+    committed = service.commit_plan_revision(workspace_id, revised, change_note="Producer revision")
+    assert committed["revision"] == 2
+    detail = service.get_workspace(workspace_id, include_candidates=False)
+    assert [item["revision"] for item in detail["plan_revisions"]] == [1, 2]
+    assert detail["plan_revisions"][-1]["current"] is True
+    assert any(beat["plan_needs_review"] for beat in detail["beats"])
+    service.archive_workspace(workspace_id)
+    assert service.list_workspaces() == []
+    assert service.list_workspaces(include_archived=True)[0]["archived"] is True
+    service.restore_workspace(workspace_id)
+    release = service.create_release("Released story lock")
+    service.assign_workspace_release(workspace_id, release["id"])
+    service.update_release_metadata(release["id"], status="released", release_date=None)
+    with pytest.raises(ProducerWorkflowError, match="cannot be unassigned"):
+        service.assign_workspace_release(workspace_id, None)
+    with pytest.raises(ProducerWorkflowError, match="cannot be deleted"):
+        service.delete_workspace(workspace_id)
     engine.dispose()
 
 
@@ -971,7 +1002,7 @@ def test_delete_one_of_four_workspaces_preserves_other_beats_and_shared_media(
     engine.dispose()
 
 
-def test_workspace_delete_filesystem_failure_keeps_database_state(
+def test_workspace_delete_cleanup_failure_keeps_recoverable_staging_copy(
     catalog_settings: Settings, monkeypatch
 ) -> None:
     engine, service, imported = _setup(catalog_settings)
@@ -983,10 +1014,10 @@ def test_workspace_delete_filesystem_failure_keeps_database_state(
         raise OSError("locked")
 
     monkeypatch.setattr(producer_service_module.shutil, "rmtree", fail_delete)
-    with pytest.raises(ProducerWorkflowError, match="workspace was kept"):
-        service.delete_workspace(workspace["workspace_id"])
-    assert service.get_workspace(workspace["workspace_id"], include_candidates=False)["total"] == 2
-    assert project.exists()
+    service.delete_workspace(workspace["workspace_id"])
+    with pytest.raises(ProducerWorkflowError, match="not found"):
+        service.get_workspace(workspace["workspace_id"], include_candidates=False)
+    assert not project.exists()
     engine.dispose()
 
 
@@ -1176,7 +1207,7 @@ def test_release_public_presentation_is_immutable_and_uses_available_image(
     engine.dispose()
 
 
-def test_release_and_workspace_history_guard_destructive_deletion(
+def test_release_history_guard_and_nonreleased_workspace_deletion(
     catalog_settings: Settings,
 ) -> None:
     engine, service, imported = _setup(catalog_settings)
@@ -1195,8 +1226,7 @@ def test_release_and_workspace_history_guard_destructive_deletion(
     service.assign_workspace_release(imported["workspace_id"], None)
     with pytest.raises(ProducerWorkflowError, match="assignment history"):
         service.delete_release(historical["id"])
-    with pytest.raises(ProducerWorkflowError, match="assignment history"):
-        service.delete_workspace(imported["workspace_id"])
+    service.delete_workspace(imported["workspace_id"])
     assert service.get_release(historical["id"])["name"] == "Historically assigned"
     engine.dispose()
 

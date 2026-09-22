@@ -18,6 +18,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
+import sqlalchemy as sa
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -39,6 +40,7 @@ from ..models import (
     ProductionEvent,
     ProducerBeat,
     ProducerBeatHiddenAsset,
+    ProducerVisualPlanRevision,
     ProducerWorkspace,
     ReleasePresentationRevision,
     ReleaseProductionArtifactVersion,
@@ -232,11 +234,13 @@ class ProducerWorkflowService:
                 )
             )
             if existing is not None:
-                if existing.plan_document_sha256 != digest:
-                    raise ProducerWorkflowError(
-                        "a different Visual Plan already exists for this story ID"
-                    )
-                return self._import_result(existing, len(plan.beats), idempotent=True)
+                if existing.plan_document_sha256 == digest:
+                    return self._import_result(existing, len(plan.beats), idempotent=True)
+                return {
+                    **self._import_result(existing, len(plan.beats), idempotent=False),
+                    "requires_confirmation": True,
+                    "diff": self._plan_diff(existing, plan),
+                }
 
             workspace = ProducerWorkspace(
                 id=str(uuid.uuid4()),
@@ -246,6 +250,12 @@ class ProducerWorkflowService:
                 plan_json=plan.model_dump(mode="json"),
             )
             session.add(workspace)
+            revision = ProducerVisualPlanRevision(
+                id=str(uuid.uuid4()), workspace=workspace, revision=1,
+                original_plan_json=plan.model_dump(mode="json"), source_sha256=digest,
+            )
+            session.add(revision)
+            workspace.current_plan_revision_id = revision.id
             for beat in sorted(plan.beats, key=lambda item: item.sequence):
                 session.add(
                     ProducerBeat(
@@ -272,6 +282,83 @@ class ProducerWorkflowService:
             session.commit()
             return self._import_result(workspace, len(plan.beats), idempotent=False)
 
+    def commit_plan_revision(self, workspace_id: str, plan: VisualPlan, *, change_note: str | None = None) -> dict[str, Any]:
+        """Commit a previewed Visual Plan as an immutable revision without losing beat history."""
+        digest = plan.document_sha256()
+        with Session(self.engine) as session:
+            workspace = session.scalar(select(ProducerWorkspace).where(ProducerWorkspace.id == workspace_id).options(selectinload(ProducerWorkspace.beats), selectinload(ProducerWorkspace.plan_revisions)))
+            if workspace is None:
+                raise ProducerWorkflowError("producer workspace was not found")
+            if workspace.story_external_id.casefold() != plan.story.story_id.casefold():
+                raise ProducerWorkflowError("Visual Plan story ID does not match this workspace")
+            if workspace.plan_document_sha256 == digest:
+                return self._import_result(workspace, len(plan.beats), idempotent=True)
+            diff = self._plan_diff(workspace, plan)
+            revision_number = max((item.revision for item in workspace.plan_revisions), default=0) + 1
+            revision = ProducerVisualPlanRevision(
+                id=str(uuid.uuid4()), workspace=workspace, revision=revision_number,
+                original_plan_json=plan.model_dump(mode="json"), source_sha256=digest,
+                change_note=change_note.strip() if change_note and change_note.strip() else None,
+            )
+            session.add(revision)
+            workspace.current_plan_revision_id = revision.id
+            workspace.plan_document_sha256 = digest
+            workspace.plan_json = plan.model_dump(mode="json")
+            active = {beat.external_beat_id: beat for beat in workspace.beats if beat.retired_at is None}
+            supplied = {beat.beat_id: beat for beat in plan.beats}
+            now = datetime.now(timezone.utc)
+            # Temporarily retire active rows so a reorder never violates the active-only
+            # sequence index while SQLite applies individual UPDATE statements.
+            for row in active.values():
+                row.retired_at = now
+            session.flush()
+            for plan_beat in sorted(plan.beats, key=lambda item: item.sequence):
+                row = active.get(plan_beat.beat_id)
+                if row is None:
+                    row = next((item for item in workspace.beats if item.external_beat_id == plan_beat.beat_id), None)
+                    if row is None:
+                        row = ProducerBeat(id=str(uuid.uuid4()), workspace=workspace, external_beat_id=plan_beat.beat_id, sequence=plan_beat.sequence, specification_json=plan_beat.model_dump(mode="json"))
+                        session.add(row)
+                    else:
+                        row.retired_at = None
+                        row.sequence = plan_beat.sequence
+                        row.specification_json = plan_beat.model_dump(mode="json")
+                else:
+                    row.retired_at = None
+                    previous = dict(row.specification_json)
+                    replacement = plan_beat.model_dump(mode="json")
+                    row.sequence = plan_beat.sequence
+                    row.specification_json = replacement
+                    if self._material_beat_change(previous, replacement):
+                        row.plan_needs_review = True
+                        if row.edit_motion_recommendation_json is not None or row.edit_transition_recommendation_json is not None:
+                            row.edit_guidance_needs_review = True
+            self._record_event(session, "workspace", workspace.id, "workspace.plan_revision_imported", before={"revision": revision_number - 1}, after={"revision": revision_number, "diff": diff})
+            session.commit()
+            return {**self._import_result(workspace, len(plan.beats), idempotent=False), "revision": revision_number, "diff": diff}
+
+    @staticmethod
+    def _material_beat_change(before: dict[str, Any], after: dict[str, Any]) -> bool:
+        fields = {"desired_visual", "must_have", "must_avoid", "media_preference", "source_requirement"}
+        return any(before.get(field) != after.get(field) for field in fields)
+
+    def _plan_diff(self, workspace: ProducerWorkspace, plan: VisualPlan) -> dict[str, Any]:
+        current = {beat.external_beat_id: beat for beat in workspace.beats if beat.retired_at is None}
+        proposed = {beat.beat_id: beat.model_dump(mode="json") for beat in plan.beats}
+        added = [item.beat_id for item in plan.beats if item.beat_id not in current]
+        removed = sorted(set(current) - set(proposed))
+        material, guidance_only, reordered, unchanged = [], [], [], []
+        for beat in plan.beats:
+            row = current.get(beat.beat_id)
+            if row is None:
+                continue
+            before, after = dict(row.specification_json), proposed[beat.beat_id]
+            if self._material_beat_change(before, after): material.append(beat.beat_id)
+            elif before != after: guidance_only.append(beat.beat_id)
+            elif row.sequence != beat.sequence: reordered.append(beat.beat_id)
+            else: unchanged.append(beat.beat_id)
+        return {"added": added, "removed": removed, "material": material, "guidance_only": guidance_only, "reordered": reordered, "unchanged": unchanged}
+
     @staticmethod
     def _import_result(
         workspace: ProducerWorkspace, beats: int, *, idempotent: bool
@@ -284,11 +371,13 @@ class ProducerWorkflowService:
             "idempotent": idempotent,
         }
 
-    def list_workspaces(self) -> list[dict[str, Any]]:
+    def list_workspaces(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
         with Session(self.engine) as session:
             rows = list(
                 session.scalars(
-                    select(ProducerWorkspace)
+                    select(ProducerWorkspace).where(
+                        sa.true() if include_archived else ProducerWorkspace.archived_at.is_(None)
+                    )
                     .options(selectinload(ProducerWorkspace.beats), selectinload(ProducerWorkspace.video_release))
                     .order_by(ProducerWorkspace.status, ProducerWorkspace.updated_at.desc())
                 )
@@ -298,9 +387,10 @@ class ProducerWorkflowService:
                     "workspace_id": row.id,
                     "story_id": row.story_external_id,
                     "title": row.title,
-                    "selected": sum(1 for beat in row.beats if beat.selected_asset_id),
-                    "total": len(row.beats),
+                    "selected": sum(1 for beat in row.beats if beat.retired_at is None and beat.selected_asset_id),
+                    "total": sum(1 for beat in row.beats if beat.retired_at is None),
                     "status": row.status,
+                    "archived": row.archived_at is not None,
                     "release": self._release_view(row.video_release),
                     "release_position": row.release_position,
                 }
@@ -326,6 +416,7 @@ class ProducerWorkflowService:
                     selectinload(ProducerWorkspace.beats).selectinload(
                         ProducerBeat.hidden_assets
                     ),
+                    selectinload(ProducerWorkspace.plan_revisions),
                     selectinload(ProducerWorkspace.document_versions),
                     selectinload(ProducerWorkspace.video_release).selectinload(
                         VideoRelease.workspaces
@@ -343,9 +434,10 @@ class ProducerWorkflowService:
                     "selected_asset_id": beat.selected_asset_id,
                     "selected_sfx_asset_id": beat.selected_sfx_asset_id,
                     "hidden_asset_ids": [item.asset_id for item in beat.hidden_assets],
+                    "plan_needs_review": beat.plan_needs_review,
                     "edit_guidance": self._edit_guidance_view(beat),
                 }
-                for beat in workspace.beats
+                for beat in workspace.beats if beat.retired_at is None
             ]
             history_page = self._event_page(
                 session, "workspace", workspace.id, offset=history_offset
@@ -371,6 +463,12 @@ class ProducerWorkflowService:
                     "document_sha256": workspace.edit_plan_document_sha256,
                     "imported_at": workspace.edit_plan_imported_at,
                 },
+                "plan_revisions": [
+                    {"id": item.id, "revision": item.revision, "source_sha256": item.source_sha256,
+                     "imported_at": item.imported_at, "change_note": item.change_note,
+                     "current": item.id == workspace.current_plan_revision_id}
+                    for item in workspace.plan_revisions
+                ],
                 "documents": self._document_groups(workspace.document_versions),
                 "selected": sum(1 for row in rows if row["selected_asset_id"]),
                 "selected_sfx": sum(1 for row in rows if row["selected_sfx_asset_id"]),
@@ -764,9 +862,12 @@ class ProducerWorkflowService:
             else None
         )
 
-    def workspace_buckets(self, *, show_finished: bool = False) -> dict[str, list[dict[str, Any]]]:
-        buckets = {"planned": [], "in_production": [], "completed": []}
-        for workspace in self.list_workspaces():
+    def workspace_buckets(self, *, show_finished: bool = False, show_archived: bool = False) -> dict[str, list[dict[str, Any]]]:
+        buckets = {"planned": [], "in_production": [], "completed": [], "archived": []}
+        for workspace in self.list_workspaces(include_archived=show_archived):
+            if workspace["archived"]:
+                if show_archived: buckets["archived"].append(workspace)
+                continue
             if workspace["status"] == "completed" and not show_finished:
                 continue
             buckets[workspace["status"]].append(workspace)
@@ -1159,8 +1260,13 @@ class ProducerWorkflowService:
         with Session(self.engine) as session:
             workspace = session.get(ProducerWorkspace, workspace_id)
             if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
+            if workspace.archived_at is not None:
+                raise ProducerWorkflowError("restore an archived workspace before assigning it")
             if not release_id:
                 if workspace.video_release_id:
+                    current_release = session.get(VideoRelease, workspace.video_release_id)
+                    if current_release and current_release.status == "released":
+                        raise ProducerWorkflowError("stories assigned to a released video release cannot be unassigned")
                     old_release_id = workspace.video_release_id
                     before = {
                         "video_release_id": old_release_id,
@@ -1188,6 +1294,10 @@ class ProducerWorkflowService:
                 raise ProducerWorkflowError("released video releases cannot accept story assignments")
             if workspace.video_release_id != release_id:
                 old_release_id = workspace.video_release_id
+                if old_release_id:
+                    old_release = session.get(VideoRelease, old_release_id)
+                    if old_release and old_release.status == "released":
+                        raise ProducerWorkflowError("stories assigned to a released video release cannot be reassigned")
                 old_position = workspace.release_position
                 if old_release_id:
                     self._record_event(
@@ -1228,6 +1338,9 @@ class ProducerWorkflowService:
         with Session(self.engine) as session:
             workspace = session.get(ProducerWorkspace, workspace_id)
             if workspace is None or not workspace.video_release_id: raise ProducerWorkflowError("workspace is not assigned to a video release")
+            release = session.get(VideoRelease, workspace.video_release_id)
+            if release and release.status == "released":
+                raise ProducerWorkflowError("story order in a released video release is locked")
             rows = list(session.scalars(select(ProducerWorkspace).where(ProducerWorkspace.video_release_id == workspace.video_release_id).order_by(ProducerWorkspace.release_position, ProducerWorkspace.created_at)))
             index = next(i for i, item in enumerate(rows) if item.id == workspace_id)
             target = index + direction
@@ -1257,35 +1370,54 @@ class ProducerWorkflowService:
             workspace = session.get(ProducerWorkspace, workspace_id)
             if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
             if workspace.video_release_id:
+                release = session.get(VideoRelease, workspace.video_release_id)
+                if release and release.status == "released":
+                    raise ProducerWorkflowError("stories assigned to a released video release cannot be deleted")
                 raise ProducerWorkflowError("unassign the workspace from its video release before deleting it")
-            if workspace.status == "completed":
-                raise ProducerWorkflowError("completed workspaces are retained as production history")
-            if session.scalar(select(ProductionEvent.id).where(ProductionEvent.subject_type == "workspace", ProductionEvent.subject_id == workspace.id, ProductionEvent.event_type == "workspace.release_assigned").limit(1)):
-                raise ProducerWorkflowError("a workspace with release assignment history is retained as production history")
             story_id = workspace.story_external_id
         projects_root = (self.settings.root / "Projects").resolve()
         target = (projects_root / story_id).resolve()
         if target == projects_root or projects_root not in target.parents: raise ProducerWorkflowError("workspace project path is unsafe")
+        staged = self.settings.temp_root / "producer-delete-staging" / f"{workspace_id}-{uuid.uuid4()}"
         try:
-            if target.exists(): shutil.rmtree(target)
-        except OSError as exc:
-            raise ProducerWorkflowError("workspace project files could not be deleted; the workspace was kept") from exc
+            if target.exists():
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(staged))
+            with Session(self.engine) as session:
+                workspace = session.get(ProducerWorkspace, workspace_id)
+                if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
+                session.delete(workspace)
+                session.commit()
+        except Exception as exc:
+            if staged.exists() and not target.exists(): shutil.move(str(staged), str(target))
+            if isinstance(exc, ProducerWorkflowError): raise
+            raise ProducerWorkflowError("workspace could not be deleted; files were restored") from exc
+        if staged.exists():
+            try:
+                shutil.rmtree(staged)
+            except OSError:
+                # DB state is already committed; retain a recoverable staged copy for cleanup.
+                pass
+        return story_id
+
+    def archive_workspace(self, workspace_id: str) -> None:
         with Session(self.engine) as session:
             workspace = session.get(ProducerWorkspace, workspace_id)
             if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
-            self._record_event(
-                session, "workspace", workspace.id, "workspace.deleted",
-                before={
-                    "story_id": workspace.story_external_id,
-                    "title": workspace.title,
-                    "status": workspace.status,
-                    "video_release_id": None,
-                    "release_position": None,
-                },
-            )
-            session.delete(workspace)
+            if workspace.video_release_id: raise ProducerWorkflowError("unassign the workspace before archiving it")
+            if workspace.archived_at is None:
+                workspace.archived_at = datetime.now(timezone.utc)
+                self._record_event(session, "workspace", workspace.id, "workspace.archived")
             session.commit()
-        return story_id
+
+    def restore_workspace(self, workspace_id: str) -> None:
+        with Session(self.engine) as session:
+            workspace = session.get(ProducerWorkspace, workspace_id)
+            if workspace is None: raise ProducerWorkflowError("producer workspace was not found")
+            if workspace.archived_at is not None:
+                workspace.archived_at = None
+                self._record_event(session, "workspace", workspace.id, "workspace.restored")
+            session.commit()
 
     def list_thumbnail_candidates(self, *, limit: int = 100) -> list[dict[str, Any]]:
         response = self.catalog.search_media(

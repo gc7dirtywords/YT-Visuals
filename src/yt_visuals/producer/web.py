@@ -67,11 +67,13 @@ def create_app(
     @app.get("/")
     def index() -> str:
         show_finished = request.args.get("show_finished") == "1"
+        show_archived = request.args.get("show_archived") == "1"
         return render_template(
             "index.html",
-            buckets=service.workspace_buckets(show_finished=show_finished),
+            buckets=service.workspace_buckets(show_finished=show_finished, show_archived=show_archived),
             releases=service.list_releases(show_released=show_finished),
             show_finished=show_finished,
+            show_archived=show_archived,
             show_import=request.args.get("import_plan") == "1",
         )
 
@@ -278,8 +280,22 @@ def create_app(
         except (ValidationError, json.JSONDecodeError) as exc:
             flash(f"Visual Plan validation failed: {_concise(exc)}", "error")
             return redirect(url_for("index", import_plan="1"))
+        if result.get("requires_confirmation"):
+            return render_template("index.html", buckets=service.workspace_buckets(), releases=service.list_releases(show_released=False), show_finished=False, show_archived=False, show_import=True, revision_preview=result, revision_document=document)
         flash("Visual Plan opened." if result["idempotent"] else "Visual Plan imported.", "success")
         return redirect(url_for("workspace", workspace_id=result["workspace_id"]))
+
+    @app.post("/plans/revision")
+    def commit_plan_revision():
+        document = request.form.get("visual_plan_json", "")
+        workspace_id = request.form.get("workspace_id", "")
+        try:
+            result = service.commit_plan_revision(workspace_id, VisualPlan.model_validate_json(document), change_note=request.form.get("change_note"))
+        except (ProducerWorkflowError, ValidationError, json.JSONDecodeError) as exc:
+            flash(f"Visual Plan revision failed: {_concise(exc)}", "error")
+            return redirect(url_for("workspace", workspace_id=workspace_id))
+        flash(f"Visual Plan revision {result.get('revision', 'current')} imported.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
 
     @app.get("/stories/<workspace_id>")
     def workspace(workspace_id: str) -> str:
@@ -450,6 +466,18 @@ def create_app(
         deleted = service.delete_workspace(workspace_id)
         flash(f"Workspace {deleted} and its project files were deleted. Master Library assets were kept.", "success")
         return redirect(url_for("index"))
+
+    @app.post("/stories/<workspace_id>/archive")
+    def archive_workspace(workspace_id: str):
+        service.archive_workspace(workspace_id)
+        flash("Story archived. It is hidden from normal production views.", "success")
+        return redirect(url_for("index"))
+
+    @app.post("/stories/<workspace_id>/restore")
+    def restore_workspace(workspace_id: str):
+        service.restore_workspace(workspace_id)
+        flash("Story restored to production views.", "success")
+        return redirect(url_for("workspace", workspace_id=workspace_id))
 
     @app.post("/stories/<workspace_id>/documents")
     def upload_story_document(workspace_id: str):

@@ -4,7 +4,7 @@
 {% block content %}
   <section class="dashboard-heading">
     <div><p class="eyebrow">Channel production</p><h1>Dashboard</h1></div>
-    <a class="button-link" href="{{ url_for('index', show_finished='0' if show_finished else '1') }}">{{ 'Hide completed / released' if show_finished else 'Show completed / released' }}</a>
+    <span><a class="button-link" href="{{ url_for('index', show_finished='0' if show_finished else '1', show_archived='1' if show_archived else None) }}">{{ 'Hide completed / released' if show_finished else 'Show completed / released' }}</a> <a class="button-link" href="{{ url_for('index', show_archived='0' if show_archived else '1', show_finished='1' if show_finished else None) }}">{{ 'Hide archived' if show_archived else 'Show archived' }}</a></span>
   </section>
 
   <div class="dashboard-columns three-column-layout">
@@ -47,6 +47,7 @@
           </section>
         {% endif %}
       {% endfor %}
+      {% if show_archived and buckets.archived %}<section class="workspace-bucket"><div class="section-heading"><h3>Archived</h3><span class="section-meta">{{ buckets.archived|length }}</span></div><div class="workspace-grid">{% for item in buckets.archived %}<a class="workspace-tile" href="{{ url_for('workspace', workspace_id=item.workspace_id) }}"><strong>{{ item.title }}</strong><span>{{ item.story_id }} · Archived</span></a>{% endfor %}</div></section>{% endif %}
     </section>
 
     <aside class="dashboard-column quick-actions-column surface-panel">
@@ -60,6 +61,7 @@
           <button class="primary" type="submit">Import Visual Plan</button>
         </form>
       </details>
+      {% if revision_preview %}<section class="surface-panel"><h3>Visual Plan revision preview</h3><p>Added: {{ revision_preview.diff.added|join(', ') or 'none' }} · Retired: {{ revision_preview.diff.removed|join(', ') or 'none' }}</p><p>Material review: {{ revision_preview.diff.material|join(', ') or 'none' }} · Guidance-only: {{ revision_preview.diff.guidance_only|join(', ') or 'none' }}</p><form action="{{ url_for('commit_plan_revision') }}" method="post"><input type="hidden" name="workspace_id" value="{{ revision_preview.workspace_id }}"><textarea name="visual_plan_json" hidden>{{ revision_document }}</textarea><label>Change note <input name="change_note"></label><button class="primary" type="submit">Import new revision</button></form></section>{% endif %}
       <a class="button-link quick-action-link" href="{{ url_for('integrations') }}">Integrations &amp; Settings</a>
     </aside>
   </div>
