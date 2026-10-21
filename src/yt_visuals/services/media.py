@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from ..models import (
+    AssetLicense,
     AssetUsage,
     MediaAsset,
     MediaLocation,
@@ -429,8 +430,25 @@ def _apply_search_filters(statement, request: SearchMediaRequest):
                 MediaSource.provider.has(func.lower(MediaProvider.name) == request.provider.casefold())
             )
         )
-    for tag in request.tags:
-        statement = statement.where(MediaAsset.tags.any(func.lower(Tag.name) == tag.casefold()))
+    tag_conditions = [
+        MediaAsset.tags.any(func.lower(Tag.name) == tag.casefold()) for tag in request.tags
+    ]
+    if tag_conditions:
+        statement = (
+            statement.where(or_(*tag_conditions))
+            if request.tag_match == "any"
+            else statement.where(*tag_conditions)
+        )
+    if request.license_status == "known":
+        statement = statement.where(MediaAsset.license.has(AssetLicense.license_name.is_not(None)))
+    elif request.license_status == "unknown":
+        statement = statement.where(
+            or_(~MediaAsset.license.has(), MediaAsset.license.has(AssetLicense.license_name.is_(None)))
+        )
+    if request.license_name:
+        statement = statement.where(
+            MediaAsset.license.has(AssetLicense.license_name.ilike(f"%{_escape_like(request.license_name)}%", escape="\\"))
+        )
     if request.creator:
         statement = statement.where(
             MediaAsset.sources.any(MediaSource.creator_name.ilike(f"%{_escape_like(request.creator)}%", escape="\\"))

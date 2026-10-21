@@ -18,7 +18,7 @@ from yt_visuals.config import Settings
 from yt_visuals.database import initialize_database
 from yt_visuals.library import LibraryScanner, LibrarySearchFilters, get_library_status, search_library
 from yt_visuals.library.inspection import inspect_media_file
-from yt_visuals.models import MediaAsset, MediaLocation, MediaProvider, MediaSource
+from yt_visuals.models import AssetLicense, MediaAsset, MediaLocation, MediaProvider, MediaSource, Tag
 
 
 def make_image(path: Path, size: tuple[int, int] = (80, 40), color: str = "red") -> bytes:
@@ -354,6 +354,8 @@ def test_status_search_filters_and_cli_json(catalog_settings: Settings, capsys) 
         landscape.sources.append(
             MediaSource(provider=MediaProvider(name="pexels"), provider_asset_id="photo:9", creator_name="Alex")
         )
+        landscape.tags.extend([Tag(name="factory"), Tag(name="industrial")])
+        landscape.license = AssetLicense(license_name="Pexels License", attribution_required=False)
         session.commit()
 
     results = search_library(
@@ -366,6 +368,12 @@ def test_status_search_filters_and_cli_json(catalog_settings: Settings, capsys) 
     assert len(results) == 1
     assert results[0].orientation == "landscape"
     assert results[0].providers == ("pexels",)
+    assert len(search_library(engine, filters=LibrarySearchFilters(
+        tags=("factory", "industrial"), tag_match="all", license_status="known"
+    ))) == 1
+    assert len(search_library(engine, filters=LibrarySearchFilters(
+        tags=("factory", "missing-tag"), tag_match="any", license_name="Pexels"
+    ))) == 1
     status = get_library_status(engine)
     assert (status.total_assets, status.images, status.unused_assets) == (2, 2, 2)
     engine.dispose()

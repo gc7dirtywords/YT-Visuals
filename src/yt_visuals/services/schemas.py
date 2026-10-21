@@ -24,6 +24,9 @@ class SearchMediaRequest(ServiceModel):
     max_duration_ms: int | None = Field(default=None, ge=0)
     provider: str | None = None
     tags: tuple[str, ...] = ()
+    tag_match: Literal["all", "any"] = "all"
+    license_status: Literal["known", "unknown"] | None = None
+    license_name: str | None = None
     creator: str | None = None
     usage: Literal["used", "unused"] | None = None
     availability: Literal["available", "missing", "any"] = "available"

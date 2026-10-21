@@ -1,5 +1,15 @@
 # Phase 9 Status
 
+## 2026-10-20 production readiness and UI polish
+
+- Producer selections remain authoritative. Material Visual Plan changes retain their immutable revision/audit flag as a subtle informational marker and do not block beat completion.
+- Release pages now derive story, presentation, transcript, and artifact readiness from current records. Resolve projects, final renders, narrator copies, and other assets are explicitly optional; missing final renders are never presented as complete.
+- Release stories use compact cards with actual image/video/SFX counts. Presentation actions, Files/downloads, artifact versioning, release settings, and history remain intact in denser disclosures.
+- Story secondary surfaces, Danger Areas, edit controls, and SFX ingestion are compact and closed by default. Local SFX uploads and URL imports are separated without changing ingestion behavior.
+- Library retrieval supports filename/text search plus multiple tags with explicit AND/OR semantics, media type, source/provider, license, and usage filters. No AI tagging, editing surface, analytics data, or schema migration was added.
+- Added lightweight Library navigation and an Analytics placeholder that explicitly performs no collection.
+- Validation: focused production/readiness/Library coverage passed (`86 passed`); full suite passed with the installed FFmpeg directory exposed (`182 passed`).
+
 ## 2026-10-20 focused Story/Beat production UX cleanup
 
 - Story secondary modules now default closed; Narration Script and Subtitles are hidden from Story Documents while their stored versions, upload endpoint, and transcript pipeline remain intact.

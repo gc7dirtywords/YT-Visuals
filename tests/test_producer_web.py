@@ -1042,6 +1042,60 @@ def test_release_presentation_and_history_render_without_internal_title_synthesi
     engine.dispose()
 
 
+def test_release_readiness_uses_actual_story_presentation_and_artifact_records(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/upload",
+        data={"media_file": (_jpeg(), "ready.jpg")},
+        content_type="multipart/form-data",
+    )
+    selected = service.get_workspace(workspace["workspace_id"], include_candidates=False)["beats"][0]["selected"]
+    release = service.create_release("Readiness release")
+    service.assign_workspace_release(workspace["workspace_id"], release["id"])
+    before = service.get_release(release["id"])
+    checks = {item["key"]: item for item in before["readiness"]["checks"]}
+    assert checks["stories"]["complete"] is True
+    assert checks["final_render"] == {
+        "key": "final_render", "label": "Final render", "complete": False,
+        "required": False, "detail": "Missing · Optional",
+    }
+    assert before["readiness"]["ready"] is False
+
+    service.create_release_presentation(
+        release["id"], public_title="Ready Public Title",
+        description="Ready public description", thumbnail_asset_id=selected["asset_id"],
+    )
+    client.post(
+        f"/stories/{workspace['workspace_id']}/documents",
+        data={"document_type": "subtitles", "story_document": (io.BytesIO(b"Spoken words\n"), "subtitles.txt")},
+        content_type="multipart/form-data",
+    )
+    service.generate_release_transcript(release["id"])
+    assert service.get_release(release["id"])["readiness"]["ready"] is True
+    page = client.get(f"/releases/{release['id']}")
+    assert b"Release Readiness" in page.data
+    assert b"Final render" in page.data and b"Missing \xc2\xb7 Optional" in page.data
+    engine.dispose()
+
+
+def test_library_page_exposes_boolean_tag_and_catalog_filters(catalog_settings: Settings) -> None:
+    engine, _app, client, _service, workspace, beat = _workspace_client(catalog_settings)
+    client.post(
+        f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/upload",
+        data={"media_file": (_jpeg(), "tagged.jpg"), "tags": ["night", "architecture"]},
+        content_type="multipart/form-data",
+    )
+    page = client.get("/library?tag=night,architecture&tag_mode=all&media_type=image&usage=unused")
+    assert page.status_code == 200
+    assert b"Match all (AND)" in page.data and b"Match any (OR)" in page.data
+    assert b"tagged" in page.data
+    assert b'href="/library"' in page.data and b'href="/analytics"' in page.data
+    assert b"No analytics are collected" in client.get("/analytics").data
+    engine.dispose()
+
+
 def test_release_thumbnail_upload_reuses_library_ingestion_and_sectioned_ui(
     catalog_settings: Settings,
 ) -> None:

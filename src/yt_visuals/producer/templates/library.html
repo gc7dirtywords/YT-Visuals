@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Library · YT-ChannelOps{% endblock %}
+{% block content %}
+<section class="compact-page-header library-header"><div><p class="eyebrow">Production Library</p><h1>Library</h1><p>{{ status.available_assets }} available · {{ status.images }} images · {{ status.videos }} videos · {{ status.audio }} SFX</p></div></section>
+<form class="library-filter-panel surface-panel" method="get">
+  <label>Search <input type="search" name="q" value="{{ filters.query }}" placeholder="Filename, title, creator, source, or tag"></label>
+  <label>Tags <input name="tag" value="{{ tag_value }}" placeholder="Comma-separated tags"></label>
+  <label>Tag behavior <select name="tag_mode"><option value="all" {% if filters.tag_match == 'all' %}selected{% endif %}>Match all (AND)</option><option value="any" {% if filters.tag_match == 'any' %}selected{% endif %}>Match any (OR)</option></select></label>
+  <label>Media type <select name="media_type"><option value="">All</option>{% for value, label in [('image','Images'),('video','Videos'),('audio','SFX')] %}<option value="{{ value }}" {% if filters.media_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>Source/provider <input name="source" value="{{ filters.provider or '' }}"></label>
+  <label>License <select name="license_status"><option value="">Any</option><option value="known" {% if filters.license_status == 'known' %}selected{% endif %}>Known</option><option value="unknown" {% if filters.license_status == 'unknown' %}selected{% endif %}>Unknown</option></select></label>
+  <label>License name <input name="license_name" value="{{ filters.license_name or '' }}"></label>
+  <label>Usage <select name="usage"><option value="">Any</option><option value="unused" {% if filters.usage == 'unused' %}selected{% endif %}>Unused</option><option value="used" {% if filters.usage == 'used' %}selected{% endif %}>Used</option></select></label>
+  <button class="primary" type="submit">Search Library</button>
+</form>
+<section class="library-results"><div class="section-heading"><h2>Assets</h2><span class="section-meta">{{ results|length }} results</span></div>{% if results %}<div class="library-grid">{% for asset in results %}<article class="library-card">{% if asset.media_type == 'image' %}<img src="{{ url_for('media', asset_id=asset.asset_id) }}" alt="">{% elif asset.media_type == 'video' %}<video src="{{ url_for('media', asset_id=asset.asset_id) }}" controls preload="metadata"></video>{% else %}<audio src="{{ url_for('media', asset_id=asset.asset_id) }}" controls preload="metadata"></audio>{% endif %}<strong>{{ asset.relative_path|replace('Library/Images/','')|replace('Library/Videos/','')|replace('Library/SFX/','') }}</strong><span>{{ asset.media_type|title }} · Used {{ asset.usage_count }} time{% if asset.usage_count != 1 %}s{% endif %}</span>{% if asset.providers %}<span>{{ asset.providers|join(', ') }}</span>{% endif %}{% if asset.tags %}<span class="tag-list">{% for tag in asset.tags %}<span class="tag-chip">{{ tag }}</span>{% endfor %}</span>{% endif %}</article>{% endfor %}</div>{% else %}<p class="empty-state">No assets match these filters.</p>{% endif %}</section>
+{% endblock %}

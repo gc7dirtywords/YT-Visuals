@@ -974,6 +974,8 @@ class ProducerWorkflowService:
                 session.scalars(
                     select(VideoRelease).options(
                         selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.beats),
+                        selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.document_versions),
+                        selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.beats).selectinload(ProducerBeat.selected_asset),
                         selectinload(VideoRelease.presentation_revisions).selectinload(
                             ReleasePresentationRevision.thumbnail_asset
                         ),
@@ -992,6 +994,8 @@ class ProducerWorkflowService:
                 .where(VideoRelease.id == release_id)
                 .options(
                     selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.beats),
+                    selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.document_versions),
+                    selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.beats).selectinload(ProducerBeat.selected_asset),
                     selectinload(VideoRelease.presentation_revisions).selectinload(
                         ReleasePresentationRevision.thumbnail_asset
                     ),
@@ -1004,6 +1008,11 @@ class ProducerWorkflowService:
             detail.update(
                 self._event_page(session, "release", release.id, offset=history_offset)
             )
+            transcript_path = self.settings.releases_root / release.id / "Captions" / f"{release.id}_YouTube_Transcript.txt"
+            transcript = next(item for item in detail["readiness"]["checks"] if item["key"] == "transcript")
+            transcript["complete"] = transcript_path.is_file()
+            transcript["detail"] = "Generated" if transcript["complete"] else "Not generated"
+            detail["readiness"]["ready"] = all(item["complete"] for item in detail["readiness"]["checks"] if item["required"])
             return detail
 
     @staticmethod
@@ -1022,15 +1031,48 @@ class ProducerWorkflowService:
             key=lambda item: (item.sequence, item.created_at, item.id),
             reverse=True,
         )
+        story_views = []
+        for item in stories:
+            beats = [beat for beat in item.beats if beat.retired_at is None]
+            image_count = sum(1 for beat in beats if beat.selected_asset and beat.selected_asset.media_type == "image")
+            video_count = sum(1 for beat in beats if beat.selected_asset and beat.selected_asset.media_type == "video")
+            sfx_beats = [beat for beat in beats if _sfx_recommendations(dict(beat.specification_json))]
+            sfx_complete = sum(1 for beat in sfx_beats if beat.selected_sfx_asset_id or beat.sfx_skipped_at)
+            visual_complete = sum(1 for beat in beats if beat.selected_asset_id)
+            document_types = {document.document_type for document in item.document_versions}
+            story_views.append({
+                "workspace_id": item.id, "title": item.title, "story_id": item.story_external_id,
+                "status": item.status, "position": item.release_position, "selected": visual_complete,
+                "total": len(beats), "images": image_count, "videos": video_count,
+                "sfx_complete": sfx_complete, "sfx_total": len(sfx_beats),
+                "complete": bool(beats) and visual_complete == len(beats) and sfx_complete == len(sfx_beats),
+                "document_types": sorted(document_types),
+            })
+        presentation = cls._presentation_view(revisions[0]) if revisions else None
+        artifact_groups = cls._artifact_groups(release.production_artifacts)
+        artifact_by_type = {item["artifact_type"]: item for item in artifact_groups}
+        narrator_copy_count = sum("narrator_copy" in item["document_types"] for item in story_views)
+        checks = [
+            {"key": "stories", "label": "Stories", "complete": bool(story_views) and all(item["complete"] for item in story_views), "required": True, "detail": f"{sum(item['complete'] for item in story_views)}/{len(story_views)} complete"},
+            {"key": "title", "label": "Public title", "complete": bool(presentation and presentation["public_title"]), "required": True, "detail": "Complete" if presentation else "Missing"},
+            {"key": "description", "label": "Description", "complete": bool(presentation and (presentation["description"] or "").strip()), "required": True, "detail": "Complete" if presentation and (presentation["description"] or "").strip() else "Missing"},
+            {"key": "thumbnail", "label": "Thumbnail", "complete": bool(presentation and presentation["thumbnail_asset_id"] and presentation["thumbnail_available"]), "required": True, "detail": "Selected" if presentation and presentation["thumbnail_asset_id"] and presentation["thumbnail_available"] else "Missing"},
+            {"key": "transcript", "label": "YouTube transcript", "complete": False, "required": True, "detail": "Not generated"},
+            {"key": "narrator_copy", "label": "Narrator copy", "complete": bool(story_views) and narrator_copy_count == len(story_views), "required": False, "detail": f"{narrator_copy_count}/{len(story_views)} uploaded · Optional"},
+            {"key": "resolve_project", "label": "Resolve project", "complete": bool(artifact_by_type["resolve_project"]["current"]), "required": False, "detail": "Uploaded · Optional" if artifact_by_type["resolve_project"]["current"] else "Missing · Optional"},
+            {"key": "final_render", "label": "Final render", "complete": bool(artifact_by_type["final_render"]["current"]), "required": False, "detail": "Uploaded · Optional" if artifact_by_type["final_render"]["current"] else "Missing · Optional"},
+            {"key": "other", "label": "Other assets", "complete": bool(artifact_by_type["other"]["current"]), "required": False, "detail": "Uploaded · Optional" if artifact_by_type["other"]["current"] else "Missing · Optional"},
+        ]
         return {
             "id": release.id,
             "name": release.name,
             "status": release.status,
             "release_date": release.release_date.isoformat() if release.release_date else None,
-            "workspaces": [{"workspace_id": item.id, "title": item.title, "story_id": item.story_external_id, "status": item.status, "position": item.release_position, "selected": sum(1 for beat in item.beats if beat.selected_asset_id), "total": len(item.beats)} for item in stories],
-            "presentation": cls._presentation_view(revisions[0]) if revisions else None,
+            "workspaces": story_views,
+            "presentation": presentation,
             "presentation_history": [cls._presentation_view(item) for item in revisions],
-            "artifacts": cls._artifact_groups(release.production_artifacts),
+            "artifacts": artifact_groups,
+            "readiness": {"ready": all(item["complete"] for item in checks if item["required"]), "checks": checks},
         }
 
     @classmethod
@@ -1222,6 +1264,7 @@ class ProducerWorkflowService:
             "thumbnail_asset_id": revision.thumbnail_asset_id,
             "thumbnail_title": thumbnail.title if thumbnail else None,
             "thumbnail_path": thumbnail.relative_path if thumbnail else None,
+            "thumbnail_available": bool(thumbnail and thumbnail.status == "active"),
             "source": revision.source,
             "change_note": revision.change_note,
             "created_at": revision.created_at,

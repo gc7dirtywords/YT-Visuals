@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import Engine, and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from ..models import AssetUsage, MediaAsset, MediaLocation, MediaProvider, MediaSource, Project, Story, Tag
+from ..models import AssetLicense, AssetUsage, MediaAsset, MediaLocation, MediaProvider, MediaSource, Project, Story, Tag
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +16,10 @@ class LibrarySearchFilters:
     usage: str | None = None
     missing: bool = False
     provider: str | None = None
+    tags: tuple[str, ...] = ()
+    tag_match: str = "all"
+    license_status: str | None = None
+    license_name: str | None = None
     mime_type: str | None = None
     min_width: int | None = None
     min_height: int | None = None
@@ -140,6 +144,25 @@ def search_library(
             MediaAsset.sources.any(
                 MediaSource.provider.has(func.lower(MediaProvider.name) == filters.provider.lower())
             )
+        )
+    tag_conditions = [
+        MediaAsset.tags.any(func.lower(Tag.name) == tag.casefold()) for tag in filters.tags
+    ]
+    if tag_conditions:
+        statement = (
+            statement.where(or_(*tag_conditions))
+            if filters.tag_match == "any"
+            else statement.where(*tag_conditions)
+        )
+    if filters.license_status == "known":
+        statement = statement.where(MediaAsset.license.has(AssetLicense.license_name.is_not(None)))
+    elif filters.license_status == "unknown":
+        statement = statement.where(
+            or_(~MediaAsset.license.has(), MediaAsset.license.has(AssetLicense.license_name.is_(None)))
+        )
+    if filters.license_name:
+        statement = statement.where(
+            MediaAsset.license.has(AssetLicense.license_name.ilike(f"%{_escape_like(filters.license_name)}%", escape="\\"))
         )
     if filters.mime_type:
         statement = statement.where(func.lower(MediaAsset.mime_type) == filters.mime_type.lower())

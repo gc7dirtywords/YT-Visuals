@@ -20,6 +20,7 @@ from ..credentials import CredentialStore, CredentialStoreError
 from ..database import initialize_database
 from ..providers.errors import ProviderAuthenticationError, ProviderError
 from ..providers.pexels import PexelsProvider
+from ..services import SearchMediaRequest
 from .contracts import EditPlan, VisualPlan
 from .service import ProducerWorkflowError, ProducerWorkflowService
 
@@ -77,6 +78,42 @@ def create_app(
             show_archived=show_archived,
             show_import=request.args.get("import_plan") == "1",
         )
+
+    @app.get("/library")
+    def library() -> str:
+        raw_tags = request.args.getlist("tag")
+        tags = tuple(
+            tag.strip().casefold()
+            for value in raw_tags
+            for tag in value.split(",")
+            if tag.strip()
+        )
+        media_type = request.args.get("media_type")
+        tag_mode = request.args.get("tag_mode")
+        license_status = request.args.get("license_status")
+        usage = request.args.get("usage")
+        search = SearchMediaRequest(
+            query=request.args.get("q", "").strip(),
+            media_type=media_type if media_type in {"image", "video", "audio"} else None,
+            provider=request.args.get("source") or None,
+            tags=tags,
+            tag_match=tag_mode if tag_mode in {"all", "any"} else "all",
+            license_status=license_status if license_status in {"known", "unknown"} else None,
+            license_name=request.args.get("license_name") or None,
+            usage=usage if usage in {"used", "unused"} else None,
+            limit=100,
+        )
+        return render_template(
+            "library.html",
+            results=service.catalog.search_media(search).candidates,
+            status=service.catalog.get_library_status(),
+            filters=search,
+            tag_value=", ".join(tags),
+        )
+
+    @app.get("/analytics")
+    def analytics() -> str:
+        return render_template("analytics.html")
 
     @app.get("/releases/<release_id>")
     def release_detail(release_id: str) -> str:

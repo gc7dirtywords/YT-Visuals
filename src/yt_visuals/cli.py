@@ -77,13 +77,17 @@ def build_parser() -> argparse.ArgumentParser:
     library_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     library_search = library_subparsers.add_parser("search", help="Search cataloged local media")
     library_search.add_argument("query", nargs="?", default="")
-    library_search.add_argument("--type", dest="media_type", choices=("image", "video"))
+    library_search.add_argument("--type", dest="media_type", choices=("image", "video", "audio"))
     library_search.add_argument("--orientation", choices=("landscape", "portrait", "square"))
     usage = library_search.add_mutually_exclusive_group()
     usage.add_argument("--unused", action="store_true")
     usage.add_argument("--used", action="store_true")
     library_search.add_argument("--missing", action="store_true")
     library_search.add_argument("--provider")
+    library_search.add_argument("--tag", action="append", default=[])
+    library_search.add_argument("--tag-mode", choices=("all", "any"), default="all")
+    library_search.add_argument("--license-status", choices=("known", "unknown"))
+    library_search.add_argument("--license-name")
     library_search.add_argument("--mime")
     library_search.add_argument("--min-width", type=int)
     library_search.add_argument("--min-height", type=int)
@@ -298,6 +302,10 @@ def _library(args: argparse.Namespace, settings: Settings) -> int:
             usage=usage,
             availability="missing" if args.missing else "available",
             provider=args.provider,
+            tags=tuple(args.tag),
+            tag_match=args.tag_mode,
+            license_status=args.license_status,
+            license_name=args.license_name,
             mime_type=args.mime,
             min_width=args.min_width,
             min_height=args.min_height,

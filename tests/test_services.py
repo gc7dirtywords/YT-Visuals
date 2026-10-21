@@ -178,6 +178,26 @@ def test_search_service_filters_and_deterministic_ranking(catalog_settings: Sett
     engine.dispose()
 
 
+def test_library_tag_boolean_and_license_filters(catalog_settings: Settings) -> None:
+    engine, best_id, used_id, _, _, _ = seed_catalog(catalog_settings)
+    service = MediaCatalogService(engine)
+    any_tags = service.search_media(
+        SearchMediaRequest(tags=("factory", "factory-used"), tag_match="any")
+    )
+    assert {item.asset_id for item in any_tags.candidates} >= {best_id, used_id}
+    all_tags = service.search_media(
+        SearchMediaRequest(tags=("factory", "industrial"), tag_match="all")
+    )
+    assert [item.asset_id for item in all_tags.candidates] == [best_id]
+    assert [item.asset_id for item in service.search_media(
+        SearchMediaRequest(license_status="known")
+    ).candidates] == [best_id]
+    assert [item.asset_id for item in service.search_media(
+        SearchMediaRequest(license_name="Pexels")
+    ).candidates] == [best_id]
+    engine.dispose()
+
+
 def test_asset_detail_is_complete_and_serializable(catalog_settings: Settings) -> None:
     engine, best_id, _, _, _, _ = seed_catalog(catalog_settings)
     detail = MediaCatalogService(engine).get_asset_detail(best_id)
