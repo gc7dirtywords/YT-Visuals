@@ -1,5 +1,13 @@
 # Phase 9 Status
 
+## 2026-10-20 Story workspace layout modernization
+
+- Beat Production is now the full-width primary workspace. Story identity, release context, applicable completion counts, Files access, and beat expand/collapse controls live in one compact sticky toolbar.
+- Persistent side columns were replaced by closed Workspace Controls and Story History disclosures. Existing organization, document, Edit Plan, storyboard, edit-folder, revision, archive, and destructive actions remain available without changing their routes or storage behavior.
+- Beat navigation remains sticky on desktop and becomes a horizontal sticky strip in narrower browsers. Expanded narration, selected media, SFX, sourcing, search results, and candidate spacing are denser and responsive while retaining all editing and selection controls.
+- No schema or data migration was required. Focused Story rendering coverage passed (`4 passed`); the FFmpeg filmstrip check passed after exposing the installed `C:\ffmpeg\bin` to the test process; the full suite passed (`182 passed`).
+- No blockers.
+
 ## 2026-10-20 production readiness and UI polish
 
 - Producer selections remain authoritative. Material Visual Plan changes retain their immutable revision/audit flag as a subtle informational marker and do not block beat completion.

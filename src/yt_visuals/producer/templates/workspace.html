@@ -3,17 +3,12 @@
 {% block title %}{{ workspace.title }} · YT-ChannelOps{% endblock %}
 {% block content %}
   <nav class="breadcrumbs"><a href="{{ url_for('index') }}">← Workspaces</a>{% if workspace.release %}<span>/</span><a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>{% endif %}</nav>
-  <section class="workspace-header">
-    <div>
-      <p class="eyebrow">{{ workspace.story_id }}</p>
-      <h1>{{ workspace.title }}</h1>
-      <p class="completion">{{ progress(workspace.selected, workspace.total) }}</p>
-      <p class="organization-summary">Status: <strong>{{ workspace.status|replace('_', ' ')|title }}</strong>{% if workspace.release %} · Video Release: <a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>{% if workspace.release_position %} · {{ workspace.release_position }} of {{ workspace.release_count }}{% endif %}{% endif %} · <a href="{{ url_for('story_files', workspace_id=workspace.workspace_id) }}" target="_blank">Files</a></p>
-    </div>
-  </section>
 
   <div class="story-layout three-column-layout">
     <aside class="production-column">
+      <details class="workspace-controls surface-panel">
+        <summary><strong>Workspace Controls</strong><span>Documents · Edit Plan · Storyboard · Files · Settings</span></summary>
+        <div class="workspace-controls-grid">
       <section class="production-section surface-panel">
         <div class="section-heading"><h2>Production</h2>{{ status_chip(workspace.status) }}</div>
         <section class="organization-section">
@@ -67,11 +62,17 @@
       <details class="danger-zone surface-panel"><summary>Danger Area</summary><p>Deletes this workspace and its project files only. Master Library assets remain.</p><form action="{{ url_for('delete_workspace', workspace_id=workspace.workspace_id) }}" method="post"><label>Type <code>{{ workspace.story_id }}</code> to confirm <input name="confirm" required></label><button type="submit">Delete workspace</button></form></details>
       <details class="production-section surface-panel"><summary>Visual Plan revisions</summary><p>{% for revision in workspace.plan_revisions %}v{{ revision.revision }}{% if revision.current %} · Current{% endif %}{% if revision.change_note %} · {{ revision.change_note }}{% endif %}<br>{% endfor %}</p></details>
       <section class="production-section surface-panel"><form action="{{ url_for('archive_workspace', workspace_id=workspace.workspace_id) }}" method="post"><button type="submit">Archive story</button></form></section>
+        </div>
+      </details>
     </aside>
 
     <section class="beats-column">
       <section class="production-toolbar" aria-label="Story production status">
-        <strong class="toolbar-title" title="{{ workspace.title }}">{{ workspace.title }}</strong>
+        <div class="toolbar-identity">
+          <span class="toolbar-kicker">{{ workspace.story_id }}</span>
+          <strong class="toolbar-title" title="{{ workspace.title }}">{{ workspace.title }}</strong>
+          <span class="toolbar-context">{{ workspace.status|replace('_', ' ')|title }}{% if workspace.release %} · <a href="{{ url_for('release_detail', release_id=workspace.release.id) }}">{{ workspace.release.name }}</a>{% if workspace.release_position %} · Story {{ workspace.release_position }} of {{ workspace.release_count }}{% endif %}{% endif %} · <a href="{{ url_for('story_files', workspace_id=workspace.workspace_id) }}" target="_blank">Files</a></span>
+        </div>
         <span class="toolbar-progress completion-counts">{% for kind in ['image', 'video', 'sfx'] %}{% set count = workspace.completion_counts[kind] %}{% if count.total %}<span><b>{{ count.complete }}/{{ count.total }}</b> {{ kind|title }}</span>{% endif %}{% endfor %}{% if workspace.completion_counts.either_outstanding %}<span title="Image or video has not been chosen yet"><b>{{ workspace.completion_counts.either_outstanding }}</b> Either pending</span>{% endif %}</span>
         <span class="toolbar-storyboard">{{ 'Storyboard ready' if workspace.storyboard.exists else 'Storyboard pending' }}</span>
         <div class="toolbar-actions"><button class="icon-button" type="button" data-expand-all title="Expand all beats" aria-label="Expand all beats">＋</button><button class="icon-button" type="button" data-collapse-all title="Collapse all beats" aria-label="Collapse all beats">−</button></div>
@@ -268,7 +269,10 @@
   </div>
     </section>
     <aside class="story-history-column">
-      {{ history_timeline(workspace.history, older_url=url_for('workspace', workspace_id=workspace.workspace_id, history_offset=workspace.history_offset + workspace.history_page_size) if workspace.history_has_older else none, newer_url=url_for('workspace', workspace_id=workspace.workspace_id, history_offset=[workspace.history_offset - workspace.history_page_size, 0]|max) if workspace.history_has_newer else none) }}
+      <details class="story-history-disclosure surface-panel">
+        <summary><strong>Story History</strong><span>Newest first</span></summary>
+        {{ history_timeline(workspace.history, older_url=url_for('workspace', workspace_id=workspace.workspace_id, history_offset=workspace.history_offset + workspace.history_page_size) if workspace.history_has_older else none, newer_url=url_for('workspace', workspace_id=workspace.workspace_id, history_offset=[workspace.history_offset - workspace.history_page_size, 0]|max) if workspace.history_has_newer else none) }}
+      </details>
     </aside>
   </div>
 {% endblock %}

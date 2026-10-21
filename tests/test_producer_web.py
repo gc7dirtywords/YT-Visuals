@@ -532,6 +532,7 @@ def test_workspace_renders_sticky_progress_navigation_and_external_import(
     response = client.get(f"/stories/{workspace['workspace_id']}")
 
     assert b'class="production-toolbar"' in response.data
+    assert workspace["story_id"].encode() in response.data
     assert b"0/1</b> Image" in response.data
     assert b"Storyboard pending" in response.data
     assert b'class="beat-navigator"' in response.data
@@ -549,6 +550,9 @@ def test_workspace_renders_sticky_progress_navigation_and_external_import(
     assert b'name="source_page_url"' in response.data
     assert b"IntersectionObserver" in client.get("/static/producer.js").data
     assert b'class="production-column"' in response.data
+    assert b'<details class="workspace-controls surface-panel">' in response.data
+    assert b'<details class="workspace-controls surface-panel" open>' not in response.data
+    assert b'<details class="story-history-disclosure surface-panel">' in response.data
     assert b"Organization" in response.data
     assert b"Open Edit Folder" in response.data
     assert b"Copy Path" in response.data
