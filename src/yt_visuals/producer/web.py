@@ -445,6 +445,20 @@ def create_app(
         flash("Asset selected for this beat.", "success")
         return _beat_redirect(service, workspace_id, beat_id, panel="local")
 
+    @app.post("/stories/<workspace_id>/beats/<beat_id>/assets/<int:asset_id>/tags")
+    def add_asset_tags(workspace_id: str, beat_id: str, asset_id: int):
+        workspace = service.get_workspace(workspace_id, include_candidates=False)
+        beat = next((item for item in workspace["beats"] if item["id"] == beat_id), None)
+        selected_ids = {
+            item["asset_id"]
+            for item in (beat.get("selected"), beat.get("selected_sfx")) if item
+        } if beat else set()
+        if asset_id not in selected_ids:
+            raise ProducerWorkflowError("only a currently selected beat asset can be tagged here")
+        service.add_asset_tags(asset_id, tuple(request.form.getlist("tags")))
+        flash("Asset tags updated.", "success")
+        return _beat_redirect(service, workspace_id, beat_id, panel=request.form.get("panel") or "local")
+
     @app.post("/stories/<workspace_id>/beats/<beat_id>/clear")
     def clear_selection(workspace_id: str, beat_id: str):
         service.clear_selection(workspace_id, beat_id)
@@ -671,6 +685,10 @@ def create_app(
                 creator_attribution=request.form.get("creator_attribution"),
                 license_name=request.form.get("license_name"),
                 license_url=request.form.get("license_url"),
+                source_name=request.form.get("source_name"),
+                attribution_text=request.form.get("attribution_text"),
+                notes=request.form.get("notes"),
+                tags=tuple(request.form.getlist("tags")),
             )
         except (ProducerWorkflowError, ProviderError):
             raise
@@ -693,7 +711,15 @@ def create_app(
         try:
             upload.save(temporary_path)
             service.import_upload(
-                workspace_id, beat_id, temporary_path, Path(upload.filename).name
+                workspace_id, beat_id, temporary_path, Path(upload.filename).name,
+                creator_name=request.form.get("creator_name"),
+                source_name=request.form.get("source_name"),
+                original_url=request.form.get("original_url"),
+                license_name=request.form.get("license_name"),
+                license_url=request.form.get("license_url"),
+                attribution_text=request.form.get("attribution_text"),
+                notes=request.form.get("notes"),
+                tags=tuple(request.form.getlist("tags")),
             )
         finally:
             temporary_path.unlink(missing_ok=True)
@@ -714,6 +740,14 @@ def create_app(
             service.import_upload(
                 workspace_id, beat_id, temporary_path, Path(upload.filename).name,
                 media_role="sfx", sfx_kind=request.form.get("sfx_kind"),
+                creator_name=request.form.get("creator_name"),
+                source_name=request.form.get("source_name"),
+                original_url=request.form.get("original_url"),
+                license_name=request.form.get("license_name"),
+                license_url=request.form.get("license_url"),
+                attribution_text=request.form.get("attribution_text"),
+                notes=request.form.get("notes"),
+                tags=tuple(request.form.getlist("tags")),
             )
         finally:
             temporary_path.unlink(missing_ok=True)
@@ -730,6 +764,9 @@ def create_app(
             license_url=request.form.get("license_url"),
             media_role="sfx", sfx_kind=request.form.get("sfx_kind"),
             source_name=request.form.get("source_name"),
+            attribution_text=request.form.get("attribution_text"),
+            notes=request.form.get("notes"),
+            tags=tuple(request.form.getlist("tags")),
         )
         flash("External SFX validated, cataloged, and selected.", "success")
         return _beat_redirect(service, workspace_id, beat_id, panel="sfx")

@@ -1,5 +1,17 @@
 # Phase 9 Status
+
+## 2026-10-20 focused Story/Beat production UX cleanup
+
+- Story secondary modules now default closed; Narration Script and Subtitles are hidden from Story Documents while their stored versions, upload endpoint, and transcript pipeline remain intact.
+- Visual Plan v1 accepts optional `beat_name` without changing stable `beat_id` matching.
+- Beat and story headers now show compact applicable media/SFX completion, including an explicit unresolved `either` count and a single final completion check.
+- Expanded beats lead with narration and consolidate secondary guidance; SFX guidance and reusable rows are compact.
+- Manual image/video/SFX ingestion accepts only user-supplied provenance, licensing, attribution, notes, and normalized tags. Tags merge on deduplication and remain searchable through the existing Library query.
+- No database migration was required: the implementation reuses `media_sources`, `asset_licenses`, `tags`/`asset_tags`, and `technical_metadata`.
+- Validation: focused Story/Beat tests passed; after exposing the installed `C:\ffmpeg\bin` to the test process, the full suite passed (`179 passed`).
+
 ## Baseline
+
 - Scope: locked in `PHASE9.md`; Phase 9A implemented.
 - Production authority: Unraid; development root: `D:\YT-Visuals`.
 ## Phase 9A completed

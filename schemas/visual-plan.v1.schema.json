@@ -120,6 +120,14 @@
           "title": "Beat Id",
           "type": "string"
         },
+        "beat_name": {
+          "anyOf": [
+            {"maxLength": 100, "minLength": 1, "type": "string"},
+            {"type": "null"}
+          ],
+          "default": null,
+          "title": "Beat Name"
+        },
         "sequence": {
           "minimum": 1,
           "title": "Sequence",

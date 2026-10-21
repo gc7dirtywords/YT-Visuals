@@ -61,6 +61,15 @@ def test_visual_plan_v1_validates_and_example_fixture_is_current() -> None:
     assert fixture.story.story_id == "example-fireplace-story"
 
 
+def test_visual_plan_beat_name_is_optional_display_metadata() -> None:
+    document = _plan()
+    document["beats"][0]["beat_name"] = "Door Slam"
+    plan = VisualPlan.model_validate(document)
+    assert plan.beats[0].beat_name == "Door Slam"
+    assert plan.beats[0].beat_id == "beat-001"
+    assert VisualPlan.model_validate(_plan()).beats[0].beat_name is None
+
+
 @pytest.mark.parametrize("duplicate_field", ["beat_id", "sequence"])
 def test_duplicate_beat_ids_and_sequences_are_rejected(duplicate_field: str) -> None:
     document = _plan()

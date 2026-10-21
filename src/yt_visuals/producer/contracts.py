@@ -84,6 +84,7 @@ class VisualPlanStory(PlanModel):
 
 class VisualPlanBeat(PlanModel):
     beat_id: str
+    beat_name: str | None = Field(default=None, min_length=1, max_length=100)
     sequence: int = Field(ge=1)
     narration_context: str = Field(min_length=1)
     desired_visual: str = Field(min_length=1)

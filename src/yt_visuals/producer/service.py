@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import shutil
+import unicodedata
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -36,7 +37,9 @@ from ..library.inspection import (
     inspect_media_file,
 )
 from ..models import (
+    AssetLicense,
     MediaAsset,
+    MediaProvider,
     MediaSource,
     ProductionEvent,
     ProducerBeat,
@@ -46,6 +49,7 @@ from ..models import (
     ReleasePresentationRevision,
     ReleaseProductionArtifactVersion,
     StoryDocumentVersion,
+    Tag,
     VideoRelease,
 )
 from ..providers.base import MediaProvider as ProviderClient
@@ -540,6 +544,18 @@ class ProducerWorkflowService:
             beat["sfx_reuse"] = self._reuse_for_beat(
                 sfx_reuse_groups, beat["id"], displayed_asset_ids=sfx_displayed
             )
+        fixed_images = [beat for beat in result["beats"] if beat["specification"]["media_preference"] == "image"]
+        fixed_videos = [beat for beat in result["beats"] if beat["specification"]["media_preference"] == "video"]
+        resolved_either_images = [beat for beat in result["beats"] if beat["specification"]["media_preference"] == "either" and beat["selected"] and beat["selected"]["media_type"] == "image"]
+        resolved_either_videos = [beat for beat in result["beats"] if beat["specification"]["media_preference"] == "either" and beat["selected"] and beat["selected"]["media_type"] == "video"]
+        unresolved_either = [beat for beat in result["beats"] if beat["specification"]["media_preference"] == "either" and not beat["selected"]]
+        sfx_beats = [beat for beat in result["beats"] if beat["sfx_recommendations"]]
+        result["completion_counts"] = {
+            "image": {"complete": sum(bool(beat["selected"]) for beat in fixed_images) + len(resolved_either_images), "total": len(fixed_images) + len(resolved_either_images)},
+            "video": {"complete": sum(bool(beat["selected"]) for beat in fixed_videos) + len(resolved_either_videos), "total": len(fixed_videos) + len(resolved_either_videos)},
+            "either_outstanding": len(unresolved_either),
+            "sfx": {"complete": sum(bool(beat["selected_sfx"] or beat["sfx_skipped"]) for beat in sfx_beats), "total": len(sfx_beats)},
+        }
         return result
 
     @staticmethod
@@ -2120,7 +2136,18 @@ class ProducerWorkflowService:
         *,
         media_role: str = "visual",
         sfx_kind: str | None = None,
+        creator_name: str | None = None,
+        source_name: str | None = None,
+        original_url: str | None = None,
+        license_name: str | None = None,
+        license_url: str | None = None,
+        attribution_text: str | None = None,
+        notes: str | None = None,
+        tags: tuple[str, ...] = (),
     ) -> dict[str, Any]:
+        original_url = _validated_https_url(original_url, field="Original URL")
+        license_url = _validated_https_url(license_url, field="License URL")
+        tags = _normalize_tags(tags)
         media_type, maximum = self._upload_media_type(original_filename)
         if media_role == "sfx":
             if media_type != "audio":
@@ -2136,6 +2163,14 @@ class ProducerWorkflowService:
             media_type=media_type,
             maximum=maximum,
             sfx_kind=sfx_kind,
+            creator_name=creator_name,
+            source_name=source_name,
+            original_url=original_url,
+            license_name=license_name,
+            license_url=license_url,
+            attribution_text=attribution_text,
+            notes=notes,
+            tags=tags,
         )
         if media_role == "sfx":
             self.select_sfx(workspace_id, beat_id, outcome["asset_id"])
@@ -2161,6 +2196,14 @@ class ProducerWorkflowService:
         media_type: str,
         maximum: int,
         sfx_kind: str | None = None,
+        creator_name: str | None = None,
+        source_name: str | None = None,
+        original_url: str | None = None,
+        license_name: str | None = None,
+        license_url: str | None = None,
+        attribution_text: str | None = None,
+        notes: str | None = None,
+        tags: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         extension = Path(original_filename).suffix.lower()
         stat = temporary_path.stat()
@@ -2216,19 +2259,13 @@ class ProducerWorkflowService:
             asset.technical_metadata = metadata
             if media_type == "audio" and sfx_kind:
                 asset.sfx_kind = sfx_kind
-            if not any(
-                source.provider_id is None
-                and source.original_filename == original_filename
-                and source.source_url is None
-                for source in asset.sources
-            ):
-                session.add(
-                    MediaSource(
-                        asset=asset,
-                        original_filename=original_filename,
-                        acquired_at=datetime.now(timezone.utc),
-                    )
-                )
+            self._merge_manual_metadata(
+                session, asset, original_filename=original_filename,
+                creator_name=creator_name, source_name=source_name,
+                original_url=original_url, license_name=license_name,
+                license_url=license_url, attribution_text=attribution_text,
+                notes=notes, tags=tags,
+            )
             session.commit()
         return {
             "asset_id": existing_id,
@@ -2251,7 +2288,11 @@ class ProducerWorkflowService:
         media_role: str = "visual",
         sfx_kind: str | None = None,
         source_name: str | None = None,
+        attribution_text: str | None = None,
+        notes: str | None = None,
+        tags: tuple[str, ...] = (),
     ) -> dict[str, Any]:
+        tags = _normalize_tags(tags)
         resolved = (
             self.wikimedia_resolver(direct_media_url)
             if _is_wikimedia_file_page(direct_media_url)
@@ -2341,12 +2382,21 @@ class ProducerWorkflowService:
             raise ProducerWorkflowError(str(exc)) from exc
         finally:
             acquisition.close()
-        if media_type == "audio" and sfx_kind:
-            with Session(self.engine) as session:
-                asset = session.get(MediaAsset, outcome.asset_id)
-                if asset is not None:
+        with Session(self.engine) as session:
+            asset = session.get(MediaAsset, outcome.asset_id)
+            if asset is not None:
+                if media_type == "audio" and sfx_kind:
                     asset.sfx_kind = sfx_kind
-                    session.commit()
+                self._merge_manual_metadata(
+                    session, asset, original_filename=Path(parsed.path).name or None,
+                    creator_name=creator, source_name=provider_name,
+                    original_url=source_url or direct_url,
+                    license_name=supplied_license_name or None,
+                    license_url=normalized_license_url,
+                    attribution_text=attribution_text or creator,
+                    notes=notes, tags=tags,
+                )
+                session.commit()
         if media_role == "sfx":
             self.select_sfx(workspace_id, beat_id, outcome.asset_id)
         else:
@@ -2358,6 +2408,83 @@ class ProducerWorkflowService:
             "source_page_url": source_url,
             "direct_media_url": direct_url,
         }
+
+    def add_asset_tags(self, asset_id: int, tags: tuple[str, ...]) -> tuple[str, ...]:
+        """Merge only explicitly supplied tags into an existing canonical asset."""
+        normalized = _normalize_tags(tags)
+        if not normalized:
+            raise ProducerWorkflowError("enter at least one asset tag")
+        with Session(self.engine) as session:
+            asset = session.scalar(select(MediaAsset).where(MediaAsset.id == asset_id).options(selectinload(MediaAsset.tags)))
+            if asset is None:
+                raise ProducerWorkflowError("asset was not found")
+            self._merge_tags(session, asset, normalized)
+            session.commit()
+            return tuple(sorted(tag.name for tag in asset.tags))
+
+    @staticmethod
+    def _merge_tags(session: Session, asset: MediaAsset, tags: tuple[str, ...]) -> None:
+        existing = {tag.name.casefold() for tag in asset.tags}
+        for name in tags:
+            if name.casefold() in existing:
+                continue
+            tag = session.scalar(select(Tag).where(func.lower(Tag.name) == name.casefold()))
+            if tag is None:
+                tag = Tag(name=name)
+                session.add(tag)
+            asset.tags.append(tag)
+            existing.add(name.casefold())
+
+    def _merge_manual_metadata(
+        self, session: Session, asset: MediaAsset, *, original_filename: str | None,
+        creator_name: str | None, source_name: str | None, original_url: str | None,
+        license_name: str | None, license_url: str | None, attribution_text: str | None,
+        notes: str | None, tags: tuple[str, ...],
+    ) -> None:
+        source_url = _validated_https_url(original_url, field="Original URL")
+        normalized_license_url = _validated_https_url(license_url, field="License URL")
+        creator = (creator_name or "").strip() or None
+        provider_label = (source_name or "").strip()[:100] or None
+        provider = None
+        if provider_label:
+            provider = session.scalar(select(MediaProvider).where(func.lower(MediaProvider.name) == provider_label.casefold()))
+            if provider is None:
+                provider = MediaProvider(name=provider_label)
+                session.add(provider)
+                session.flush()
+        if original_filename or creator or source_url or provider:
+            duplicate = any(
+                source.provider_id == (provider.id if provider else None)
+                and source.original_filename == original_filename
+                and source.source_url == source_url
+                and source.creator_name == creator
+                for source in asset.sources
+            )
+            if not duplicate:
+                session.add(MediaSource(asset=asset, provider=provider, original_filename=original_filename, source_url=source_url, creator_name=creator, acquired_at=datetime.now(timezone.utc)))
+        supplied_license = (license_name or "").strip() or None
+        supplied_attribution = (attribution_text or "").strip() or None
+        if supplied_license or normalized_license_url or supplied_attribution:
+            record = asset.license
+            if record is None:
+                record = AssetLicense(asset=asset, attribution_required=bool(supplied_attribution))
+                session.add(record)
+            if not record.license_name and supplied_license:
+                record.license_name = supplied_license
+            if not record.license_url and normalized_license_url:
+                record.license_url = normalized_license_url
+            if not record.attribution_text and supplied_attribution:
+                record.attribution_text = supplied_attribution
+                record.attribution_required = True
+        normalized_notes = (notes or "").strip()
+        if normalized_notes:
+            metadata = dict(asset.technical_metadata or {})
+            manual_notes = list(metadata.get("manual_notes", []))
+            if normalized_notes not in manual_notes:
+                manual_notes.append(normalized_notes)
+            metadata["manual_notes"] = manual_notes
+            asset.technical_metadata = metadata
+        self._merge_tags(session, asset, _normalize_tags(tags))
 
     def build_edit_folder(
         self,
@@ -2711,6 +2838,7 @@ class ProducerWorkflowService:
             "available": detail.available,
             "usage_count": detail.usage_count,
             "last_used_at": detail.last_used_at.isoformat() if detail.last_used_at else None,
+            "tags": list(detail.tags),
             "source": {
                 "origin": origin,
                 "provider": source.provider if source else None,
@@ -2773,6 +2901,22 @@ def _sfx_recommendations(specification: dict[str, Any]) -> list[dict[str, Any]]:
 def _validate_sfx_kind(value: str | None) -> None:
     if value not in {"one_shot", "ambient"}:
         raise ProducerWorkflowError("choose whether the SFX is a one-shot or ambient sound")
+
+
+def _normalize_tags(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize producer-entered tags without deriving any new values."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        for raw_tag in raw_value.split(","):
+            tag = " ".join(unicodedata.normalize("NFKC", raw_tag).strip().split()).casefold()
+            if not tag or tag in seen:
+                continue
+            if len(tag) > 100:
+                raise ProducerWorkflowError("asset tags must be 100 characters or fewer")
+            normalized.append(tag)
+            seen.add(tag)
+    return tuple(normalized)
 
 
 def _validated_https_url(

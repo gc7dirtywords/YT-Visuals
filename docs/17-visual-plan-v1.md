@@ -14,6 +14,8 @@ A small valid example is [`examples/visual-plan.v1.json`](../examples/visual-pla
 - Story and beat IDs are stable lowercase editorial identifiers.
 - Every plan has at least one beat and every beat has at least one nonempty search query.
 - Beat IDs and sequences are unique within the plan.
+- `beat_name` is optional display metadata; `beat_id` remains the stable identity used
+  by revisions, selections, edit guidance, and production history.
 - `media_preference` is `image`, `video`, or `either`.
 - `source_requirement` is `representative` or `exact`.
 - Production opportunities are optional. Each requires a narration-specific trigger and

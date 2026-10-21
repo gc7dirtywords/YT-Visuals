@@ -146,6 +146,52 @@ def test_web_plan_import_workspace_and_upload_selection(catalog_settings: Settin
     engine.dispose()
 
 
+def test_manual_upload_metadata_and_tags_merge_on_duplicate_asset(
+    catalog_settings: Settings,
+) -> None:
+    engine, _app, client, service, workspace, beat = _workspace_client(catalog_settings)
+    route = f"/stories/{workspace['workspace_id']}/beats/{beat['id']}/upload"
+    first = client.post(
+        route,
+        data={
+            "media_file": (_jpeg(), "door-original.jpg"),
+            "creator_name": "Archive Creator",
+            "source_name": "Manual Archive",
+            "original_url": "https://archive.example/door",
+            "license_name": "CC BY 4.0",
+            "license_url": "https://creativecommons.org/licenses/by/4.0/",
+            "attribution_text": "Photo by Archive Creator",
+            "notes": "Use the uncropped master.",
+            "tags": [" Dark Hall ", "door"],
+        },
+        content_type="multipart/form-data",
+    )
+    assert first.status_code == 302
+    second = client.post(
+        route,
+        data={
+            "media_file": (_jpeg(), "duplicate.jpg"),
+            "license_name": "should not replace documented license",
+            "tags": ["DOOR", "architecture"],
+        },
+        content_type="multipart/form-data",
+    )
+    assert second.status_code == 302
+
+    selected = service.get_workspace(workspace["workspace_id"], include_candidates=False)["beats"][0]["selected"]
+    assert selected["tags"] == ["architecture", "dark hall", "door"]
+    assert selected["source"]["provider"] == "Manual Archive"
+    assert selected["source"]["creator_name"] == "Archive Creator"
+    assert selected["license"]["name"] == "CC BY 4.0"
+    assert selected["license"]["attribution_text"] == "Photo by Archive Creator"
+    assert service.search_existing_media("dark hall")[0]["asset_id"] == selected["asset_id"]
+    with Session(engine) as session:
+        asset = session.get(MediaAsset, selected["asset_id"])
+        assert asset is not None
+        assert asset.technical_metadata["manual_notes"] == ["Use the uncropped master."]
+    engine.dispose()
+
+
 def test_web_plan_import_accepts_direct_json_paste(catalog_settings: Settings) -> None:
     engine = initialize_database(catalog_settings)
     app = create_app(catalog_settings, engine=engine)
@@ -180,8 +226,7 @@ def test_web_edit_plan_import_by_paste_and_file_with_compact_guidance(
     )
     assert pasted.status_code == 200
     assert b"Edit Plan imported for 1 beats" in pasted.data
-    assert b"Project recommendation" in pasted.data
-    assert b"Producer choice" in pasted.data
+    assert b"Edit Guidance" in pasted.data
     assert b"Slow Zoom In" in pasted.data
 
     updated = client.post(
@@ -216,9 +261,9 @@ def test_web_story_document_upload_history_view_and_download(
     workspace_id = workspace["workspace_id"]
     initial = client.get(f"/stories/{workspace_id}")
     assert b"Story Documents" in initial.data
-    assert b"Narration Script" in initial.data
+    assert b"Narration Script" not in initial.data
     assert b"Narrator Copy" in initial.data
-    assert b"Subtitles" in initial.data
+    assert b"Subtitles" not in initial.data
 
     first_content = b"First subtitle document\n"
     first = client.post(
@@ -245,8 +290,6 @@ def test_web_story_document_upload_history_view_and_download(
         follow_redirects=True,
     )
     assert b"Subtitles version 2 stored" in second.data
-    assert "Current · v2".encode("utf-8") in second.data
-    assert b"Earlier versions (1)" in second.data
 
     documents = service.get_workspace(workspace_id, include_candidates=False)["documents"]
     subtitles = next(item for item in documents if item["document_type"] == "subtitles")
@@ -489,7 +532,7 @@ def test_workspace_renders_sticky_progress_navigation_and_external_import(
     response = client.get(f"/stories/{workspace['workspace_id']}")
 
     assert b'class="production-toolbar"' in response.data
-    assert b'class="toolbar-progress"><b>0 / 1</b> SELECTED' in response.data
+    assert b"0/1</b> Image" in response.data
     assert b"Storyboard pending" in response.data
     assert b'class="beat-navigator"' in response.data
     assert b'href="#beat-001"' in response.data
@@ -628,10 +671,14 @@ def test_rendered_external_form_drives_full_wikimedia_import_and_persistence(
     }
     assert rendered_names == {
         "direct_media_url",
+        "source_name",
         "source_page_url",
         "creator_attribution",
         "license_name",
         "license_url",
+        "attribution_text",
+        "notes",
+        "tags",
     }
 
     form_data = {name: "" for name in rendered_names}
@@ -815,9 +862,9 @@ def test_phase9c_upload_first_and_sfx_resolution_controls(catalog_settings: Sett
     initial = client.get(f"/stories/{imported['workspace_id']}").data
     assert initial.index(b"<summary>Upload</summary>") < initial.index(b"<summary>Local Library</summary>") < initial.index(b"<summary>Pexels</summary>")
     assert initial.index(b"Recommended searches") < initial.index(b"<summary>SFX")
-    assert b'<details class="sourcing-panel upload" open>' in initial
+    assert b'<details class="sourcing-panel upload">' in initial
     assert b'<details class="sourcing-panel local local-library" >' in initial
-    assert b"SFX !" in initial
+    assert b"SFX outstanding" in initial
 
     client.post(
         f"/stories/{imported['workspace_id']}/beats/{beat['id']}/upload",
@@ -825,7 +872,7 @@ def test_phase9c_upload_first_and_sfx_resolution_controls(catalog_settings: Sett
         content_type="multipart/form-data",
     )
     unresolved = client.get(f"/stories/{imported['workspace_id']}").data
-    assert b"SFX OUTSTANDING" in unresolved
+    assert b"SFX outstanding" in unresolved
     assert b'<details class="beat-disclosure" open>' in unresolved
     skipped = client.post(
         f"/stories/{imported['workspace_id']}/beats/{beat['id']}/sfx/skip",
@@ -833,7 +880,7 @@ def test_phase9c_upload_first_and_sfx_resolution_controls(catalog_settings: Sett
     )
     assert b"SFX skipped for this beat" in skipped.data
     resolved = client.get(f"/stories/{imported['workspace_id']}").data
-    assert b"SFX \xe2\x9c\x93" in resolved
+    assert b"Beat complete" in resolved
     assert b'beat-card completed fully-resolved' in resolved
     assert b'<details class="beat-disclosure" >' in resolved
     engine.dispose()
