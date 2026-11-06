@@ -789,6 +789,12 @@ class VideoRelease(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255, collation="NOCASE"), nullable=False, unique=True)
+    storage_path: Mapped[str | None] = mapped_column(
+        String(255), 
+        nullable=True, 
+        default=None,
+        comment='Path component for release folder (defaults to id for backward compatibility)'
+    )
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="planned", server_default="planned"
     )

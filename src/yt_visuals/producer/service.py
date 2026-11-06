@@ -717,7 +717,11 @@ class ProducerWorkflowService:
         self, story_id: str, video_release_id: str | None
     ) -> Path:
         if video_release_id:
-            root = self.settings.releases_root / video_release_id / "Stories"
+            # Get release to use storage_path (defaults to id for backward compatibility)
+            release = self.get_release(video_release_id, include_candidates=False)
+            path_component = release.storage_path or video_release_id
+            
+            root = self.settings.releases_root / path_component / "Stories"
         else:
             root = self.settings.projects_root / "Unassigned"
         path = root / story_id
@@ -950,6 +954,7 @@ class ProducerWorkflowService:
             {
                 "id": release.id,
                 "name": release.name,
+                "storage_path": release.storage_path,
                 "status": release.status,
                 "release_date": release.release_date.isoformat() if release.release_date else None,
             }
@@ -1087,12 +1092,30 @@ class ProducerWorkflowService:
     def _artifact_view(item: ReleaseProductionArtifactVersion) -> dict[str, Any]:
         return {"id": item.id, "artifact_type": item.artifact_type, "version": item.version, "original_filename": item.original_filename, "stored_filename": item.stored_filename, "sha256": item.sha256, "mime_type": item.mime_type, "file_size_bytes": item.file_size_bytes, "technical_metadata": item.technical_metadata or {}, "uploaded_at": item.uploaded_at.isoformat()}
 
+    def get_release(self, release_id: str, include_candidates: bool = True) -> VideoRelease | None:
+        """Get a release object, optionally including candidates for story generation."""
+        if include_candidates:
+            return session.scalar(
+                select(VideoRelease).where(VideoRelease.id == release_id).options(
+                    selectinload(VideoRelease.workspaces).selectinload(ProducerWorkspace.document_versions)
+                )
+            )
+        else:
+            # Minimal query for path resolution (fastest)
+            return session.scalar(select(VideoRelease).where(VideoRelease.id == release_id))
+
     def release_artifacts_folder(self, release_id: str, artifact_type: str | None = None) -> Path:
-        path = self.settings.releases_root / release_id
+        # Get the release to check storage_path (defaults to id for backward compatibility)
+        release = self.get_release(release_id, include_candidates=False)
+        
+        # Use storage_path if set, otherwise fall back to id (backward compatibility)
+        path_component = release.storage_path or release_id
+        
+        path = self.settings.releases_root / path_component
         _assert_within(path, self.settings.releases_root)
         if artifact_type is not None:
             path = path / RELEASE_ARTIFACT_FOLDERS[artifact_type]
-            _assert_within(path, self.settings.releases_root / release_id)
+            _assert_within(path, self.settings.releases_root / path_component)
         return path
 
     def story_files_root(self, workspace_id: str) -> Path:
@@ -1352,10 +1375,16 @@ class ProducerWorkflowService:
         clean = name.strip()
         if not clean:
             raise ProducerWorkflowError("release name is required")
+        
+        # Use cleaned name as storage_path for new releases (for folder path)
+        # This ensures folders are named with human-readable names from the start
+        storage_path = clean
+        
         with Session(self.engine) as session:
             if session.scalar(select(VideoRelease).where(func.lower(VideoRelease.name) == clean.casefold())):
                 raise ProducerWorkflowError("a video release with that name already exists")
-            release = VideoRelease(id=str(uuid.uuid4()), name=clean)
+            
+            release = VideoRelease(id=str(uuid.uuid4()), name=clean, storage_path=storage_path)
             session.add(release)
             self._record_event(
                 session,
@@ -1370,13 +1399,28 @@ class ProducerWorkflowService:
     def rename_release(self, release_id: str, name: str) -> None:
         clean = name.strip()
         if not clean: raise ProducerWorkflowError("release name is required")
+        
         with Session(self.engine) as session:
             release = session.get(VideoRelease, release_id)
-            if release is None: raise ProducerWorkflowError("video release was not found")
-            duplicate = session.scalar(select(VideoRelease).where(func.lower(VideoRelease.name) == clean.casefold(), VideoRelease.id != release_id))
-            if duplicate: raise ProducerWorkflowError("a video release with that name already exists")
+            if release is None: 
+                raise ProducerWorkflowError("video release was not found")
+            
+            # Check for duplicates
+            duplicate = session.scalar(
+                select(VideoRelease).where(
+                    func.lower(VideoRelease.name) == clean.casefold(), 
+                    VideoRelease.id != release_id
+                )
+            )
+            if duplicate: 
+                raise ProducerWorkflowError("a video release with that name already exists")
+            
             before = {"name": release.name}
             release.name = clean
+            
+            # Update storage_path to new name (for folder path)
+            release.storage_path = clean
+            
             self._record_event(
                 session, "release", release.id, "release.renamed", before=before,
                 after={"name": clean},
