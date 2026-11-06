@@ -6,8 +6,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
-COPY Tools/migrate_release_paths.sh /app/Tools/migrate_release_paths.sh
-RUN chmod +x /app/Tools/migrate_release_paths.sh && pip install --no-cache-dir .
+RUN pip install --no-cache-dir .
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 RUN chmod +x /usr/local/bin/docker-entrypoint
 EXPOSE 8765

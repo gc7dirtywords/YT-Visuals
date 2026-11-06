@@ -928,12 +928,12 @@ def test_phase9b_moves_single_workspace_between_canonical_story_roots(
     second = service.create_release("Storage release two")
 
     service.assign_workspace_release(workspace_id, first["id"])
-    first_root = catalog_settings.releases_root / first["id"] / "Stories" / story_id
+    first_root = catalog_settings.releases_root / first["storage_path"] / "Stories" / story_id
     assert first_root.joinpath("history.txt").read_text(encoding="utf-8") == "preserve me"
     assert not legacy.exists()
 
     service.assign_workspace_release(workspace_id, second["id"])
-    second_root = catalog_settings.releases_root / second["id"] / "Stories" / story_id
+    second_root = catalog_settings.releases_root / second["storage_path"] / "Stories" / story_id
     assert second_root.joinpath("history.txt").is_file()
     assert not first_root.exists()
 
@@ -987,7 +987,7 @@ def test_phase9b_database_failure_restores_moved_workspace(
     monkeypatch.setattr(producer_service_module.Session, "commit", fail_commit)
     with pytest.raises(RuntimeError, match="database unavailable"):
         service.assign_workspace_release(workspace_id, release["id"])
-    target = catalog_settings.releases_root / release["id"] / "Stories" / imported["story_id"]
+    target = catalog_settings.releases_root / release["storage_path"] / "Stories" / imported["story_id"]
     assert source.joinpath("keep.txt").is_file()
     assert not target.exists()
     engine.dispose()
@@ -1020,14 +1020,14 @@ def test_phase9b_audio_release_artifacts_and_transcript(catalog_settings: Settin
     service.upload_story_document(first_id, "subtitles", first_subtitles, first_subtitles.name)
     service.upload_story_document(second["workspace_id"], "subtitles", second_subtitles, second_subtitles.name)
     transcript = service.generate_release_transcript(release["id"])
-    assert transcript == catalog_settings.releases_root / release["id"] / "Captions" / f"{release['id']}_YouTube_Transcript.txt"
+    assert transcript == catalog_settings.releases_root / release["storage_path"] / "Captions" / f"{release['id']}_YouTube_Transcript.txt"
     assert transcript.read_bytes() == b"First spoken line\n\nSecond spoken line\n"
 
     project = temp / "episode.drp"
     project.write_bytes(b"DaVinci project")
     artifact = service.upload_release_artifact(release["id"], "resolve_project", project, project.name)
     artifact_path, _ = service.release_artifact_path(release["id"], artifact["id"])
-    assert artifact_path.parent == catalog_settings.releases_root / release["id"] / "DaVinci"
+    assert artifact_path.parent == catalog_settings.releases_root / release["storage_path"] / "DaVinci"
     engine.dispose()
 
 

@@ -6,45 +6,31 @@ All notable changes to YT-Visuals will be documented in this file.
 
 ### Added
 - `storage_path` column to `video_releases` table (Alembic migration 0017)
-- Human-readable folder names for release assets instead of UUID paths
+- Stable, Windows/SMB-safe human-readable storage paths for new releases
+- Explicit `yt-visuals release-storage migrate` audit and one-time migration utility
+- Content manifests, durable migration journaling, conflict detection, and interrupted-move recovery
 
 ### Changed
-- Release artifact folders now use `storage_path` (defaults to name) instead of raw `id` (UUID)
-- New releases are created with their name as the folder path component immediately
+- Release storage resolution is centralized for stories, artifacts, transcripts, and file browsing
+- Existing releases with `storage_path IS NULL` continue to use their UUID directories
+- Display-title changes no longer change a release's stable storage path
+- Release-directory migration is never run during container startup
 
 ### Migration Notice
-**Automated migration included**: The Docker image includes `/Tools/migrate_release_paths.sh` that:
-- Runs automatically on container startup (via docker-entrypoint.sh) after Alembic upgrade
-- Converts existing UUID-based release folders to name-based paths
-- Creates symlinks as backup before renaming (safe, idempotent)
-
-**Startup order on Unraid Docker**:
-1. Container starts with new image
-2. `docker-entrypoint.sh` runs first: creates volume directories → links to app roots
-3. Alembic runs `upgrade head` (applies migration 0017 adding storage_path column)
-4. Migration script `/app/Tools/migrate_release_paths.sh` runs and renames folders
-5. Application starts with gunicorn
-
-**Files in Docker image**:
-- `/app/Tools/migrate_release_paths.sh` - Migration script (read-only, part of image)
-- `/app/Tools/migration.log` - Created by migration script (writable volume mount recommended)
-
-**Unraid setup**: Mount `/config` volume to include `.migration_complete` marker if desired.
-
-### Files Added
-- `migrations/versions/0017_add_storage_path_column.py` - Database migration
-- `Tools/migrate_release_paths.sh` - Unraid startup migration script
+The next deployment does not rename any release directories. Run
+`yt-visuals release-storage migrate --dry-run --json` separately to inventory legacy
+UUID directories. Filesystem moves require `--execute`, an exact confirmation token,
+and should be performed only after review and backup.
 
 ### Backward Compatibility
-- Existing deployments continue to work until migration runs
-- New releases use name-based paths from creation
-- Symlink backup ensures zero data loss during migration
+- Existing UUID directories remain authoritative while `storage_path` is null
+- Existing `.backup-*` symlinks are reported as aliases and are not treated as backups
+- Missing and empty legacy directories are reported without being created or deleted
 
 ### Bug Fixes
-- Migration script now correctly processes legacy UUID-based folders (was incorrectly skipping them)
-- Migration script now skips backup folders (.backup suffix) and new name-based formats
-- Migration script added sanitize_name() function for proper filesystem-safe path handling (spaces→underscores, special chars removed)
-- Migration script now runs without idempotency marker on first boot to ensure legacy folders are migrated
+- Restored the original session-scoped release lookup API that had been overwritten
+- Removed the defective startup shell migration and misleading symlink-backup behavior
+- Corrected transcript readiness and all release file consumers to use the same path resolver
 
 ---
 

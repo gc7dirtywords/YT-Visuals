@@ -588,7 +588,7 @@ def test_browser_files_view_supports_story_release_view_download_and_zip(
 
     release = service.create_release("Browser Files")
     service.assign_workspace_release(workspace_id, release["id"])
-    release_file = catalog_settings.root / "Releases" / release["id"] / "Other" / "release.txt"
+    release_file = catalog_settings.root / "Releases" / release["storage_path"] / "Other" / "release.txt"
     release_file.parent.mkdir(parents=True, exist_ok=True)
     release_file.write_text("release file", encoding="utf-8")
     release_page = client.get(f"/releases/{release['id']}/files")

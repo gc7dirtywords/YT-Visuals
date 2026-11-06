@@ -12,11 +12,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from .acquisition import AcquisitionOutcome, AcquisitionService
 from .config import Settings
 from .database import initialize_database
+from .database import create_catalog_engine
 from .doctor import all_checks_pass, run_doctor
 from .library import LibraryScanner
 from .providers.base import MediaProvider, MediaSearchResult, SearchPage
 from .providers.errors import ProviderError
 from .providers.registry import create_provider, list_providers
+from .release_storage import (
+    EXECUTION_CONFIRMATION,
+    build_migration_plan,
+    execute_migration,
+)
 from .services import MediaCatalogService, MediaServiceError, SearchMediaRequest
 from .workflow import VisualWorkflowError, VisualWorkflowService
 
@@ -46,6 +52,28 @@ def build_parser() -> argparse.ArgumentParser:
     database = subparsers.add_parser("db", help="Database maintenance")
     database_subparsers = database.add_subparsers(dest="database_command", required=True)
     database_subparsers.add_parser("upgrade", help="Create or migrate the catalog database")
+
+    release_storage = subparsers.add_parser(
+        "release-storage", help="Audit or explicitly migrate release directories"
+    )
+    release_storage_subparsers = release_storage.add_subparsers(
+        dest="release_storage_command", required=True
+    )
+    release_storage_migrate = release_storage_subparsers.add_parser(
+        "migrate", help="Dry-run by default; move directories only with explicit authorization"
+    )
+    release_storage_mode = release_storage_migrate.add_mutually_exclusive_group()
+    release_storage_mode.add_argument(
+        "--dry-run", action="store_true", help="Inspect only (the default)"
+    )
+    release_storage_mode.add_argument("--execute", action="store_true")
+    release_storage_migrate.add_argument(
+        "--confirm", help=f"Execution confirmation token: {EXECUTION_CONFIRMATION}"
+    )
+    release_storage_migrate.add_argument("--release-id", action="append", default=[])
+    release_storage_migrate.add_argument("--journal", type=Path)
+    release_storage_migrate.add_argument("--report", type=Path)
+    release_storage_migrate.add_argument("--json", action="store_true")
 
     providers = subparsers.add_parser("providers", help="List available media providers")
     providers.add_argument("--json", action="store_true", help="Print machine-readable JSON")
@@ -164,6 +192,9 @@ def cli(
             print(f"Database is current: {settings.database_path}")
             return 0
 
+        if args.command == "release-storage":
+            return _release_storage(args, settings)
+
         if args.command == "providers":
             registrations = list_providers(settings)
             if args.json:
@@ -199,6 +230,54 @@ def cli(
         return 1
 
     return 2
+
+
+def _release_storage(args: argparse.Namespace, settings: Settings) -> int:
+    if not settings.database_path.is_file():
+        raise RuntimeError(f"catalog database was not found: {settings.database_path}")
+    engine = create_catalog_engine(settings)
+    try:
+        journal = args.journal or settings.data_dir / "release-storage-migration.jsonl"
+        if args.execute:
+            entries = execute_migration(
+                settings,
+                engine,
+                confirmation=args.confirm or "",
+                journal_path=journal,
+                release_ids=set(args.release_id) or None,
+            )
+        else:
+            entries = build_migration_plan(settings, engine)
+        payload = {
+            "mode": "execute" if args.execute else "dry-run",
+            "database": str(settings.database_path),
+            "releases_root": str(settings.releases_root),
+            "journal": str(journal),
+            "entries": [entry.to_dict() for entry in entries],
+        }
+        rendered = json.dumps(payload, indent=2, ensure_ascii=False)
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(rendered + "\n", encoding="utf-8")
+        if args.json:
+            print(rendered)
+        else:
+            print(f"Release storage {payload['mode']}: {len(entries)} release(s)")
+            for entry in entries:
+                print(
+                    f"  {entry.release_id} [{entry.state}] {entry.release_name}\n"
+                    f"    {entry.source} -> {entry.destination}"
+                )
+                for issue in entry.issues:
+                    print(f"    WARNING: {issue}")
+                for alias in entry.backup_aliases:
+                    print(f"    ALIAS (not a backup): {alias['path']} -> {alias['target']}")
+            if args.report:
+                print(f"Report written: {args.report}")
+        blocking = {"conflict", "configured_path_missing", "destination_only"}
+        return 1 if any(entry.state in blocking for entry in entries) else 0
+    finally:
+        engine.dispose()
 
 
 def _visual(

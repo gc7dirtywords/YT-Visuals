@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from copy import deepcopy
 from pathlib import Path
@@ -478,6 +479,8 @@ def test_missing_locked_asset_is_blocked_without_editable_review(
 
 
 def test_video_preview_extracts_deterministic_filmstrip(catalog_settings: Settings) -> None:
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
     video_path = catalog_settings.root / "Library" / "Videos" / "night-train.mp4"
     video_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(

@@ -427,6 +427,26 @@ Run the tests:
 .\.venv\Scripts\python.exe -m pytest
 ```
 
+## Release directory storage
+
+New releases use a stable, human-readable, Windows/SMB-safe directory component stored
+in `video_releases.storage_path`. Renaming a release's display title does not rename its
+directory. Existing records with a null `storage_path` remain fully compatible with their
+UUID directory under `Releases`.
+
+Container startup never renames release directories. To create a read-only JSON report
+for legacy releases, run:
+
+```sh
+yt-visuals release-storage migrate --dry-run --json --report /config/release-storage-plan.json
+```
+
+The report identifies real directories, symlinks (including `.backup-*` aliases), missing
+paths, empty directories, conflicts, and proposed destinations. The separate execution
+mode requires the exact confirmation token printed by `--help`, writes a durable journal,
+hashes directory contents before and after each move, and updates `storage_path` only
+after verification. Review and back up production data before authorizing execution.
+
 ## Database changes
 
 Schema changes belong in a new file under `migrations/versions`; do not edit a migration
