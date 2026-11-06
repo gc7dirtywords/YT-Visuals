@@ -17,4 +17,10 @@ if [ -f "$db" ] && [ "$current" != "$head" ]; then
   sqlite3 "$backup" 'PRAGMA quick_check;' | grep -qx ok
 fi
 alembic -c /app/alembic.ini upgrade head
+# Run release path migration if migration script exists (converts UUID paths to name-based)
+if [ -f "/app/Tools/migrate_release_paths.sh" ]; then
+  echo "=== Running release path migration ===" 
+  chmod +x /app/Tools/migrate_release_paths.sh
+  /app/Tools/migrate_release_paths.sh || true
+fi
 exec "$@"

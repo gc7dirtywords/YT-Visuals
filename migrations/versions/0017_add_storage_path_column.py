@@ -18,7 +18,7 @@ import sqlalchemy as sa
 
 # Revision identifiers
 revision = '0017'
-down_revision = '0016'
+down_revision = '0016_beat_sfx_skip'
 branch_labels = None
 depends_on = None
 
