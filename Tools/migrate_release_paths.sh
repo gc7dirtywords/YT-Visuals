@@ -165,7 +165,7 @@ migrate_releases() {
             ln -sT "$uuid_folder" "$backup_path" 2>/dev/null || log_warn "Could not create backup symlink at $backup_path"
         fi
         
-    done < <(find "$RELEASES_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%P\n' 2>/dev/null | sort)
+    done
     
     # Summary
     log_info "Migration complete: $migrated migrated, $failed failed, $skipped skipped (already new format)"
