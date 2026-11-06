@@ -13,10 +13,23 @@ All notable changes to YT-Visuals will be documented in this file.
 - New releases are created with their name as the folder path component immediately
 
 ### Migration Notice
-**Automated migration included**: The repository includes a shell script at `Tools/migrate_release_paths.sh` that:
-- Runs automatically on Unraid container startup when pulling new images
+**Automated migration included**: The Docker image includes `/Tools/migrate_release_paths.sh` that:
+- Runs automatically on container startup (via docker-entrypoint.sh) after Alembic upgrade
 - Converts existing UUID-based release folders to name-based paths
 - Creates symlinks as backup before renaming (safe, idempotent)
+
+**Startup order on Unraid Docker**:
+1. Container starts with new image
+2. `docker-entrypoint.sh` runs first: creates volume directories → links to app roots
+3. Alembic runs `upgrade head` (applies migration 0017 adding storage_path column)
+4. Migration script `/app/Tools/migrate_release_paths.sh` runs and renames folders
+5. Application starts with gunicorn
+
+**Files in Docker image**:
+- `/app/Tools/migrate_release_paths.sh` - Migration script (read-only, part of image)
+- `/app/Tools/migration.log` - Created by migration script (writable volume mount recommended)
+
+**Unraid setup**: Mount `/config` volume to include `.migration_complete` marker if desired.
 
 ### Files Added
 - `migrations/versions/0017_add_storage_path_column.py` - Database migration

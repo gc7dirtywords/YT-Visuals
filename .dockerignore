@@ -8,6 +8,7 @@ Projects
 Releases
 Temp
 Tools
+!Tools/migrate_release_paths.sh
 .env
 *.sqlite3
 *.bak
