@@ -139,6 +139,14 @@ migrate_releases() {
         local new_path="${RELEASES_ROOT}/${sanitized_name}"
         
         log_info "Processing: $uuid_folder -> $new_path (name: '${release_name}' -> sanitized: '$sanitized_name')"
+
+        # Check if source folder exists
+        if [ ! -d "$uuid_folder" ]; then
+            log_warn "Source folder does not exist: $uuid_folder"
+            log_info "Release ID from database might be wrong or folder was already moved"
+            ((skipped++))
+            continue
+        fi
         
         # Check if destination already exists (may have been created by previous failed attempts or new releases)
         if [ -e "$new_path" ]; then
