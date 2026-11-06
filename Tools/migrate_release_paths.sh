@@ -134,7 +134,7 @@ migrate_releases() {
         log_info "Processing: $uuid_folder -> $new_path (name: '${release_name}' -> sanitized: '$sanitized_name')"
         
         # Rename the actual folder FIRST (before any backup)
-        if mv -- "$uuid_folder" "$new_path" 2>/dev/null; then
+        if mv -- "$uuid_folder" "$new_path"; then
             log_success "Renamed $uuid_folder -> $new_path"
             
             # Optionally create a symlink from old location to new for reference (non-blocking)
@@ -145,12 +145,17 @@ migrate_releases() {
             
             ((migrated++))
         else
-            log_error "Failed to rename $uuid_folder -> $new_path"
+            local mv_error=$?
+            log_error "Failed to rename $uuid_folder -> $new_path (exit code: $mv_error)"
+            log_error "Checking source directory..."
+            ls -la "$uuid_folder" 2>&1
+            log_error "Checking destination path..."
+            ls -la "$new_path" 2>&1 || echo "Destination does not exist or is not accessible"
             ((failed++))
             
             # Try to create backup symlink at alternative location as recovery
             local backup_path="${RELEASES_ROOT}/${sanitized_name}.backup-$(date +%s)"
-            ln -sT "$uuid_folder" "$backup_path" 2>/dev/null || true
+            ln -sT "$uuid_folder" "$backup_path" 2>/dev/null || log_warn "Could not create backup symlink at $backup_path"
         fi
         
     done < <(find "$RELEASES_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%P\n' 2>/dev/null | sort)
