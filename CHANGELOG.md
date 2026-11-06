@@ -41,7 +41,10 @@ All notable changes to YT-Visuals will be documented in this file.
 - Symlink backup ensures zero data loss during migration
 
 ### Bug Fixes
-- Migration script now sanitizes release names (replaces spaces with underscores, removes special characters) to prevent filesystem errors on Unix systems
+- Migration script now correctly processes legacy UUID-based folders (was incorrectly skipping them)
+- Migration script now skips backup folders (.backup suffix) and new name-based formats
+- Migration script added sanitize_name() function for proper filesystem-safe path handling (spaces→underscores, special chars removed)
+- Migration script now runs without idempotency marker on first boot to ensure legacy folders are migrated
 
 ---
 
