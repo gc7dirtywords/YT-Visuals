@@ -44,7 +44,7 @@ log_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG_FILE" 2>/dev/null || echo "[SUCCESS] $1"
 }
 
-# UUID pattern for old-style paths
+# UUID pattern for old-style paths (lowercase hex with hyphens)
 UUID_PATTERN='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
 # Check if a path is UUID-based (old style)
@@ -75,6 +75,18 @@ get_release_storage_path_from_db() {
     fi
 }
 
+# Sanitize release name for filesystem safety:
+# - Replace spaces with underscores
+# - Remove special characters (keep only alphanumeric, underscores, hyphens)
+sanitize_name() {
+    local name="$1"
+    # Replace spaces with underscores first
+    name="${name// /_}"
+    # Remove any character that is NOT alphanumeric, underscore, or hyphen
+    name=$(echo "$name" | tr -cd '[:alnum:]_-')
+    echo "$name"
+}
+
 # Main migration function
 migrate_releases() {
     local migrated=0
@@ -87,19 +99,15 @@ migrate_releases() {
         return 1
     fi
     
-    # Check if already migrated (idempotency check)
-    if [ -f "$MIGRATION_COMPLETE_FILE" ]; then
-        log_info "Migration already completed. Skipping."
-        return 0
-    fi
+    # Remove idempotency marker so migration can run again
+    rm -f "$MIGRATION_COMPLETE_FILE" 2>/dev/null || true
     
     log_info "Starting release path migration..."
 
-    # Find all release folders using UUID-based names (use for loop to avoid subshell)
-    for uuid_folder_raw in "$RELEASES_ROOT"/*/; do
-        if [ ! -d "$uuid_folder_raw" ]; then
-            continue
-        fi
+    # Find all subdirectories in releases root (use find to handle special chars)
+    while IFS= read -r -d '' uuid_folder_raw; do
+        # Skip if not a directory
+        [ ! -d "$uuid_folder_raw" ] && continue
         
         # Remove trailing slash if present
         uuid_folder="${uuid_folder_raw%/}"
@@ -108,84 +116,97 @@ migrate_releases() {
             continue
         fi
         
-        # Skip if already migrated (new name pattern - not a UUID)
-        if ! is_uuid_path "$uuid_folder"; then
-            log_info "Skipping $uuid_folder - not a UUID-based path"
+        log_info "Checking: $uuid_folder"
+        
+        # Skip backup folders (already have .backup suffix)
+        if [[ "$uuid_folder" == *.backup* ]]; then
+            log_info "Skipping $uuid_folder - backup folder"
             ((skipped++))
             continue
         fi
         
-        # Get the release ID from the folder name
-        local release_id="$uuid_folder"
-        
-        # Get release storage_path/name from database
-        local release_name
-        release_name=$(get_release_storage_path_from_db "$release_id")
-        
-        if [ -z "$release_name" ] || [ "$release_name" = "None" ]; then
-            log_error "Could not get release name for $release_id from database. Skipping."
-            ((failed++))
+        # New format check: starts with ECH_NNN_ or similar (e.g., ECH_R0001_A..., ECHR0001__, etc)
+        if [[ "$uuid_folder" =~ ^[A-Z]+ ]]; then
+            log_info "Skipping $uuid_folder - new name-based format (starts with uppercase)"
+            ((skipped++))
             continue
         fi
         
-        # Sanitize release name for filesystem safety:
-        # - Replace spaces with underscores
-        # - Remove special characters (keep only alphanumeric, underscores, hyphens in safe positions)
-        local sanitized_name="${release_name}"
-        sanitized_name="${sanitized_name// /_}"           # Replace spaces with underscores
-        sanitized_name="${sanitized_name//-/}_R"          # Replace hyphens to avoid issues
-        sanitized_name=$(echo "$sanitized_name" | tr -cd '[:alnum:]_-')  # Keep only safe chars
-        
-        local new_path="${RELEASES_ROOT}/${sanitized_name}"
-        
-        log_info "Processing: $uuid_folder -> $new_path (name: '${release_name}' -> sanitized: '$sanitized_name')"
+        # Legacy UUID path - needs migration
+        if is_uuid_path "$uuid_folder"; then
+            # Get the release ID from the folder name
+            local release_id="$uuid_folder"
+            
+            # Get release storage_path/name from database
+            local release_name
+            release_name=$(get_release_storage_path_from_db "$release_id")
+            
+            if [ -z "$release_name" ] || [ "$release_name" = "None" ]; then
+                log_error "Could not get release name for $release_id from database. Skipping."
+                ((failed++))
+                continue
+            fi
+            
+            # Sanitize release name for filesystem safety
+            local sanitized_name
+            sanitized_name=$(sanitize_name "$release_name")
+            
+            local new_path="${RELEASES_ROOT}/${sanitized_name}"
+            
+            log_info "Processing: $uuid_folder -> $new_path (name: '${release_name}' -> sanitized: '$sanitized_name')"
 
-        # Check if source folder exists
-        if [ ! -d "$uuid_folder" ]; then
-            log_warn "Source folder does not exist: $uuid_folder"
-            log_info "Release ID from database might be wrong or folder was already moved"
-            ((skipped++))
-            continue
-        fi
-        
-        # Check if destination already exists (may have been created by previous failed attempts or new releases)
-        if [ -e "$new_path" ]; then
-            log_warn "Destination path already exists: $new_path"
-            log_warn "Contents of existing destination:"
-            ls -la "$new_path" 2>&1 || true
-            ((skipped++))
-            continue
-        fi
-        
-        # Rename the actual folder FIRST (before any backup)
-        if mv -- "$uuid_folder" "$new_path"; then
-            log_success "Renamed $uuid_folder -> $new_path"
+            # Check if source folder exists
+            if [ ! -d "$uuid_folder" ]; then
+                log_warn "Source folder does not exist: $uuid_folder"
+                log_info "Release ID from database might be wrong or folder was already moved"
+                ((skipped++))
+                continue
+            fi
             
-            # Optionally create a symlink from old location to new for reference (non-blocking)
-            ln -sT "$new_path" "$uuid_folder" 2>/dev/null || true
+            # Check if destination already exists (may have been created by previous failed attempts)
+            if [ -e "$new_path" ]; then
+                log_warn "Destination path already exists: $new_path"
+                log_warn "Contents of existing destination:"
+                ls -la "$new_path" 2>&1 || true
+                ((skipped++))
+                continue
+            fi
             
-            # Mark as migrated for this release
-            echo "${release_id}:${new_path}:$(date +%s)" >> "$MIGRATION_COMPLETE_FILE" 2>/dev/null || true
+            # Rename the actual folder FIRST (before any backup)
+            if mv -- "$uuid_folder" "$new_path"; then
+                log_success "Renamed $uuid_folder -> $new_path"
+                
+                # Create a symlink from old location as reference (non-blocking)
+                ln -sT "$new_path" "$uuid_folder" 2>/dev/null || true
+                
+                # Mark as migrated for this release
+                echo "${release_id}:${new_path}:$(date +%s)" >> "$MIGRATION_COMPLETE_FILE" 2>/dev/null || true
+                
+                ((migrated++))
+            else
+                local mv_error=$?
+                log_error "Failed to rename $uuid_folder -> $new_path (exit code: $mv_error)"
+                log_error "Checking source directory..."
+                ls -la "$uuid_folder" 2>&1
+                log_error "Checking destination path..."
+                ls -la "$new_path" 2>&1 || echo "Destination does not exist or is not accessible"
+                ((failed++))
+                
+                # Try to create backup symlink at alternative location as recovery
+                local backup_path="${RELEASES_ROOT}/${sanitized_name}.backup-$(date +%s)"
+                ln -sT "$uuid_folder" "$backup_path" 2>/dev/null || log_warn "Could not create backup symlink at $backup_path"
+            fi
             
-            ((migrated++))
         else
-            local mv_error=$?
-            log_error "Failed to rename $uuid_folder -> $new_path (exit code: $mv_error)"
-            log_error "Checking source directory..."
-            ls -la "$uuid_folder" 2>&1
-            log_error "Checking destination path..."
-            ls -la "$new_path" 2>&1 || echo "Destination does not exist or is not accessible"
-            ((failed++))
-            
-            # Try to create backup symlink at alternative location as recovery
-            local backup_path="${RELEASES_ROOT}/${sanitized_name}.backup-$(date +%s)"
-            ln -sT "$uuid_folder" "$backup_path" 2>/dev/null || log_warn "Could not create backup symlink at $backup_path"
+            # Unknown format folder - skip and log for review
+            log_warn "Unknown format: $uuid_folder (skipping for manual review)"
+            ((skipped++))
         fi
         
-    done
+    done < <(find "$RELEASES_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
     
     # Summary
-    log_info "Migration complete: $migrated migrated, $failed failed, $skipped skipped (already new format)"
+    log_info "Migration complete: $migrated migrated, $failed failed, $skipped skipped"
     
     return 0
 }
