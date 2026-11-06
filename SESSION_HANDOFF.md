@@ -61,15 +61,20 @@ On Unraid:
 
 ## Known Issues / Notes
 
-### Recent fixes (commit 432d5e4)
+### Recent fixes (commits 700c042, 432d5e4, aa45402)
 
-The migration script was failing because it was creating a symlink backup BEFORE renaming the folder, causing `mv` to fail when the target path already exists (even as a symlink). This has been fixed by:
+**Root cause identified**: The migration script was failing because:
+1. It wasn't properly iterating over source folders (missing find command feeding the while loop)
+2. No validation of source folder existence before attempting to move it
+3. No check for pre-existing destination paths (which could come from failed previous attempts or concurrent processes)
 
-1. **Renaming first**: The actual folder is renamed before any backup symlink is created
-2. **Optional reference symlink**: After successful rename, creates optional symlink from old location to new for reference
-3. **Recovery fallback**: On failure, creates backup symlink at alternative location with timestamp
+**Latest fixes applied**:
+1. **Fixed iteration**: Changed from `while | while` subshell to proper `for` loop with find
+2. **Source validation**: Added check to skip releases where source folder doesn't exist
+3. **Destination check**: Added check to skip if destination already exists (with logging)
+4. **Improved error logging**: Shows detailed ls output when mv fails
 
-Error logging has also been improved to show detailed diagnostics when `mv` fails (source/destination directory listings).
+The migration script now handles edge cases gracefully and won't fail silently anymore.
 
 ### Migration script reads from config volume
 
