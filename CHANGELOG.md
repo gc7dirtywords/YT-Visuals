@@ -40,6 +40,9 @@ All notable changes to YT-Visuals will be documented in this file.
 - New releases use name-based paths from creation
 - Symlink backup ensures zero data loss during migration
 
+### Bug Fixes
+- Migration script now sanitizes release names (replaces spaces with underscores, removes special characters) to prevent filesystem errors on Unix systems
+
 ---
 
 ## [0.9B] - Initial Phase 9 Release
