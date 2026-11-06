@@ -140,6 +140,15 @@ migrate_releases() {
         
         log_info "Processing: $uuid_folder -> $new_path (name: '${release_name}' -> sanitized: '$sanitized_name')"
         
+        # Check if destination already exists (may have been created by previous failed attempts or new releases)
+        if [ -e "$new_path" ]; then
+            log_warn "Destination path already exists: $new_path"
+            log_warn "Contents of existing destination:"
+            ls -la "$new_path" 2>&1 || true
+            ((skipped++))
+            continue
+        fi
+        
         # Rename the actual folder FIRST (before any backup)
         if mv -- "$uuid_folder" "$new_path"; then
             log_success "Renamed $uuid_folder -> $new_path"
