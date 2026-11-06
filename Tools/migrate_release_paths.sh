@@ -13,12 +13,12 @@
 #
 # BEHAVIOR: Idempotent - safe to run multiple times without side effects.
 #
-
 set -euo pipefail
 
 SCRIPT_NAME="migrate_release_paths.sh"
 LOG_FILE="/config/yt_visuals/migration.log"
-RELEASES_ROOT="${YT_CHANNELOPS_RELEASES_ROOT:-/mnt/user/appdata/YT-ChannelOps/Releases}"
+RELEASES_ROOT="${YT_CHANNELOPS_RELEASES_ROOT:-/releases}"
+CATALOG_DB="${YT_CHANNELOPS_CONFIG_ROOT:-/config}/catalog.sqlite3"
 MIGRATION_COMPLETE_FILE="/config/yt_visuals/.migration_complete"
 
 # Colors for output
@@ -33,7 +33,7 @@ log_info() {
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $(date '+$(date +%s)') $1" | tee -a "$LOG_FILE" 2>/dev/null || echo "[WARN] $1"
+    echo -e "${YELLOW}[WARN]${NC} $(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG_FILE" 2>/dev/null || echo "[WARN] $1"
 }
 
 log_error() {
@@ -53,17 +53,24 @@ is_uuid_path() {
     echo "$path" | grep -qE "^$UUID_PATTERN$"
 }
 
-# Extract release name from database
-get_release_name_from_db() {
+# Extract release storage_path/name from database
+get_release_storage_path_from_db() {
     local release_id="$1"
     
-    if command -v sqlite3 &> /dev/null && [ -f "${RELEASES_ROOT}/catalog.sqlite3" ]; then
+    # Check if sqlite3 is available and db exists
+    if command -v sqlite3 &> /dev/null && [ -f "$CATALOG_DB" ]; then
+        # First try storage_path column (new column added by migration 0017)
         local name
-        name=$(sqlite3 "${RELEASES_ROOT}/catalog.sqlite3" \
-            "SELECT name FROM video_releases WHERE id = '${release_id}';" 2>/dev/null) || name=""
+        name=$(sqlite3 "$CATALOG_DB" "SELECT storage_path FROM video_releases WHERE id = '${release_id}';" 2>/dev/null) || true
+        
+        # If storage_path is NULL or empty, try to get from name field
+        if [ -z "$name" ] || [ "$name" = "NULL" ]; then
+            name=$(sqlite3 "$CATALOG_DB" "SELECT name FROM video_releases WHERE id = '${release_id}';" 2>/dev/null) || true
+        fi
+        
         echo "$name"
     else
-        # SQLite not available, return empty
+        # SQLite not available or db not found, return empty
         echo ""
     fi
 }
@@ -84,13 +91,12 @@ create_symlink_backup() {
 migrate_releases() {
     local migrated=0
     local failed=0
+    local skipped=0
     
     # Ensure releases root exists
     if [ ! -d "$RELEASES_ROOT" ]; then
         log_warn "Releases root does not exist: $RELEASES_ROOT"
-        mkdir -p "$RELEASES_ROOT" 2>/dev/null && \
-            log_info "Created releases root: $RELEASES_ROOT" || \
-            log_warn "Could not create releases root (check permissions)"
+        return 1
     fi
     
     # Check if already migrated (idempotency check)
@@ -107,21 +113,23 @@ migrate_releases() {
             continue
         fi
         
-        # Skip if already migrated (new name pattern)
+        # Skip if already migrated (new name pattern - not a UUID)
         if ! is_uuid_path "$uuid_folder"; then
             log_info "Skipping $uuid_folder - not a UUID-based path"
+            ((skipped++))
             continue
         fi
         
         # Get the release ID from the folder name
         local release_id="$uuid_folder"
         
-        # Get release name from database
+        # Get release storage_path/name from database
         local release_name
-        release_name=$(get_release_name_from_db "$release_id")
+        release_name=$(get_release_storage_path_from_db "$release_id")
         
-        if [ -z "$release_name" ]; then
-            log_warn "Could not get release name for $release_id from database. Skipping."
+        if [ -z "$release_name" ] || [ "$release_name" = "None" ]; then
+            log_error "Could not get release name for $release_id from database. Skipping."
+            ((failed++))
             continue
         fi
         
@@ -138,7 +146,7 @@ migrate_releases() {
             log_success "Renamed $uuid_folder -> $new_path"
             
             # Mark as migrated for this release
-            echo "$release_id:$new_path:$(date +%s)" >> "$MIGRATION_COMPLETE_FILE" 2>/dev/null || true
+            echo "${release_id}:${new_path}:$(date +%s)" >> "$MIGRATION_COMPLETE_FILE" 2>/dev/null || true
             
             ((migrated++))
         else
@@ -152,11 +160,7 @@ migrate_releases() {
     done < <(find "$RELEASES_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%P\n' 2>/dev/null | sort)
     
     # Summary
-    if [ $migrated -gt 0 ]; then
-        log_success "Migration complete: $migrated folders migrated, $failed failed"
-    else
-        log_info "No UUID-based release folders found. Already migrated or empty."
-    fi
+    log_info "Migration complete: $migrated migrated, $failed failed, $skipped skipped (already new format)"
     
     return 0
 }
