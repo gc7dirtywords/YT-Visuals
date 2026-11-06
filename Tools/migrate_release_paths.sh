@@ -133,16 +133,23 @@ migrate_releases() {
             continue
         fi
         
-        # Construct new path
-        local new_path="${RELEASES_ROOT}/${release_name}"
+        # Sanitize release name for filesystem safety:
+        # - Replace spaces with underscores
+        # - Remove special characters (keep only alphanumeric, underscores, hyphens in safe positions)
+        local sanitized_name="${release_name}"
+        sanitized_name="${sanitized_name// /_}"           # Replace spaces with underscores
+        sanitized_name="${sanitized_name//-/}_R"          # Replace hyphens to avoid issues
+        sanitized_name=$(echo "$sanitized_name" | tr -cd '[:alnum:]_-')  # Keep only safe chars
         
-        log_info "Processing: $uuid_folder -> $new_path (name: $release_name)"
+        local new_path="${RELEASES_ROOT}/${sanitized_name}"
         
-        # Create symlink as backup (new folder pointing to old)
+        log_info "Processing: $uuid_folder -> $new_path (name: '${release_name}' -> sanitized: '$sanitized_name')"
+        
+        # Create symlink as backup first (new folder pointing to old)
         create_symlink_backup "$uuid_folder" "$new_path"
         
-        # Rename the actual folder
-        if mv "$uuid_folder" "$new_path" 2>/dev/null; then
+        # Rename the actual folder with proper quoting for paths containing spaces/special chars
+        if mv -- "$uuid_folder" "$new_path" 2>/dev/null; then
             log_success "Renamed $uuid_folder -> $new_path"
             
             # Mark as migrated for this release
@@ -153,8 +160,9 @@ migrate_releases() {
             log_error "Failed to rename $uuid_folder -> $new_path"
             ((failed++))
             
-            # Try to create backup symlink as recovery
-            create_symlink_backup "$uuid_folder" "${new_path}.backup-$(date +%s)"
+            # Try to create backup symlink as recovery with sanitized name
+            local backup_path="${RELEASES_ROOT}/${sanitized_name}.backup-$(date +%s)"
+            create_symlink_backup "$uuid_folder" "$backup_path"
         fi
         
     done < <(find "$RELEASES_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%P\n' 2>/dev/null | sort)
