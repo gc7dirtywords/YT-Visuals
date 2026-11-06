@@ -94,9 +94,16 @@ migrate_releases() {
     fi
     
     log_info "Starting release path migration..."
-    
-    # Find all release folders using UUID-based names
-    while IFS= read -r uuid_folder; do
+
+    # Find all release folders using UUID-based names (use for loop to avoid subshell)
+    for uuid_folder_raw in "$RELEASES_ROOT"/*/; do
+        if [ ! -d "$uuid_folder_raw" ]; then
+            continue
+        fi
+        
+        # Remove trailing slash if present
+        uuid_folder="${uuid_folder_raw%/}"
+        
         if [ -z "$uuid_folder" ]; then
             continue
         fi
