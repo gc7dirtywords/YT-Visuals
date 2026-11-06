@@ -75,18 +75,6 @@ get_release_storage_path_from_db() {
     fi
 }
 
-# Create symlink from new path to old path as backup
-create_symlink_backup() {
-    local old_path="$1"
-    local new_path="$2"
-    
-    if [ -d "$old_path" ] && [ ! -L "$new_path" ] && [ ! -d "$new_path" ]; then
-        ln -sT "$old_path" "$new_path" 2>/dev/null && \
-            log_info "Created symlink backup: $new_path -> $old_path" || \
-            log_warn "Failed to create symlink: $new_path -> $old_path (may need permissions)"
-    fi
-}
-
 # Main migration function
 migrate_releases() {
     local migrated=0
@@ -145,12 +133,12 @@ migrate_releases() {
         
         log_info "Processing: $uuid_folder -> $new_path (name: '${release_name}' -> sanitized: '$sanitized_name')"
         
-        # Create symlink as backup first (new folder pointing to old)
-        create_symlink_backup "$uuid_folder" "$new_path"
-        
-        # Rename the actual folder with proper quoting for paths containing spaces/special chars
+        # Rename the actual folder FIRST (before any backup)
         if mv -- "$uuid_folder" "$new_path" 2>/dev/null; then
             log_success "Renamed $uuid_folder -> $new_path"
+            
+            # Optionally create a symlink from old location to new for reference (non-blocking)
+            ln -sT "$new_path" "$uuid_folder" 2>/dev/null || true
             
             # Mark as migrated for this release
             echo "${release_id}:${new_path}:$(date +%s)" >> "$MIGRATION_COMPLETE_FILE" 2>/dev/null || true
@@ -160,9 +148,9 @@ migrate_releases() {
             log_error "Failed to rename $uuid_folder -> $new_path"
             ((failed++))
             
-            # Try to create backup symlink as recovery with sanitized name
+            # Try to create backup symlink at alternative location as recovery
             local backup_path="${RELEASES_ROOT}/${sanitized_name}.backup-$(date +%s)"
-            create_symlink_backup "$uuid_folder" "$backup_path"
+            ln -sT "$uuid_folder" "$backup_path" 2>/dev/null || true
         fi
         
     done < <(find "$RELEASES_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%P\n' 2>/dev/null | sort)
